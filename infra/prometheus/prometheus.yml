@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # target-server 자체 메트릭 (FastAPI에 prometheus-fastapi-instrumentator 적용 시)
+  - job_name: "target-server"
+    static_configs:
+      - targets: ["target-server:8080"]
+
+  # cAdvisor — 컨테이너 CPU/Mem 메트릭 (Docker 컨테이너 리소스 모니터링용)
+  - job_name: "cadvisor"
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # Prometheus 자체 모니터링
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

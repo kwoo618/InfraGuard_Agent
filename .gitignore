@@ -1,0 +1,51 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+
+# ===== 환경변수 / 시크릿 =====
+.env
+.env.local
+*.pem
+*.key
+
+# ===== 테스트 / 커버리지 =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Docker =====
+*.log
+
+# ===== Locust =====
+infra/locust/*.csv
+infra/locust/*_stats*.html
+
+# ===== Prometheus / Grafana 로컬 데이터 =====
+infra/prometheus/data/
+infra/grafana/data/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ===== 임시 산출물 =====
+*.tmp
+*.bak
+reports/
