@@ -1,29 +1,51 @@
-# 가상환경
-venv/
-.venv/
-
-# Python 캐시
+# ===== Python =====
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
 
-# 환경변수
+# ===== 환경변수 / 시크릿 =====
 .env
-.env.*
+.env.local
+*.pem
+*.key
 
-# VSCode / IDE
-.vscode/
-.idea/
-
-# 테스트 / 캐시
+# ===== 테스트 / 커버리지 =====
 .pytest_cache/
+.coverage
+htmlcov/
+.tox/
 .mypy_cache/
 .ruff_cache/
 
-# 로그
+# ===== Docker =====
 *.log
 
-# OS 파일
+# ===== Locust =====
+infra/locust/*.csv
+infra/locust/*_stats*.html
+
+# ===== Prometheus / Grafana 로컬 데이터 =====
+infra/prometheus/data/
+infra/grafana/data/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
-Thumbs.db
+
+# ===== 임시 산출물 =====
+*.tmp
+*.bak
+reports/
