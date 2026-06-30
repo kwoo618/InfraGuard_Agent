@@ -114,70 +114,53 @@ startBtn.addEventListener('click', () => {
     eventSource = new EventSource('/api/v1/agent/start');
 
     eventSource.onmessage = function (event) {
-
         const data = JSON.parse(event.data);
 
-    
-
         if (data.status === 'running') {
-
             appendLog(data.message, 'info');
-
             completeStep("step-load");
-
             activateStep("step-metric");
-
         }
-
 
         else if (data.status === 'analyzing') {
-
             appendLog(data.message, 'info');
-
             completeStep("step-metric");
-
             activateStep("step-ai");
-
         }
-
         
-
-        else if (data.status === 'need_approval') {
-
-            appendLog(`가드레일 작동 : ${data.message}`, 'warning');
-
-            currentTaskId = data.task_id;
-
-            modalMessage.innerText = data.message;
-
-            completeStep("step-ai");
-
-            activateStep("step-plan");
-
-            completeStep("step-plan");
-
-            activateStep("step-approval");
-
-            updateStatus("🟠 WAITING APPROVAL", "waiting");
-
-            approvalModal.classList.remove("hidden");
-
+        // 에러 상태 분기 추가
+        else if (data.status === 'error') {
+            appendLog(data.message, 'error');
+            updateStatus("🔴 ERROR", "error");
             eventSource.close();
-
+            startBtn.disabled = false;
         }
-
+        
+        else if (data.status === 'need_approval') {
+            appendLog(`가드레일 작동 : ${data.message}`, 'warning');
+            currentTaskId = data.task_id;
+            modalMessage.innerText = data.message;
+            completeStep("step-ai");
+            activateStep("step-plan");
+            completeStep("step-plan");
+            activateStep("step-approval");
+            updateStatus("🟠 WAITING APPROVAL", "waiting");
+            approvalModal.classList.remove("hidden");
+            eventSource.close();
+        }
     };
 
     eventSource.onerror = function () {
-
-        appendLog("스트리밍 연결 종료.", "system");
-
+        // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
+        if (eventSource.readyState !== EventSource.CLOSED) {
+            appendLog("[에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! docker compose up -d를 확인하세요.", "error");
+            updateStatus("🔴 ERROR", "error");
+        } else {
+            appendLog("스트리밍 연결 종료.", "system");
+        }
         eventSource.close();
-
         startBtn.disabled = false;
-
     };
-
 });
 
 
