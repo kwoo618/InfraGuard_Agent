@@ -1,5 +1,6 @@
 """
-이하은 - Locust 실행 + 결과 파싱 Tool.
+run_load_test.py
+Locust 실행 + 결과 파싱 Tool.
 
 ReAct Loop의 첫 Action으로 호출되어 target-server에 실제 부하를 발생시키고,
 Locust의 CSV 통계 출력을 파싱해 LoadTestResult로 변환한다.

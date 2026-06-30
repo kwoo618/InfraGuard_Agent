@@ -1,5 +1,5 @@
 """
-이하은 - InfraGuard target-server에 대한 Locust 부하 시나리오.
+locustfile.py - InfraGuard target-server에 대한 Locust 부하 시나리오.
 
 infra/target-server/main.py 의 엔드포인트(/light, /heavy, /flaky, /health)를 대상으로
 실제 트래픽 패턴을 흉내낸다. 가벼운 트래픽이 대부분이고 일부 요청이

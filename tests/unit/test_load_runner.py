@@ -1,5 +1,5 @@
 """
-이하은 - run_load_test Tool 단위 테스트.
+test_load_runner.py - run_load_test Tool 단위 테스트.
 
 CONTRIBUTING.md 테스트 규칙에 따라 실제 Locust 프로세스를 띄우지 않고
 subprocess.Popen을 Mock 처리한다 (CPU/시간 비용이 큰 실제 부하 테스트를
