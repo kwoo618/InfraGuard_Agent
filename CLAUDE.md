@@ -1,0 +1,186 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 프로젝트 개요
+
+**InfraGuard Agent** — Locust로 실제 부하를 직접 만들어 시스템 한계를 측정하고,
+AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 최적화하는 자율 진단 파이프라인.
+
+사후 알림이 아닌 **사전 진단 + 자율 판단 + HITL 승인** 후 실행이 핵심 가치다.
+
+## 팀 역할 분담
+
+| 팀원 | 역할 | 담당 파일 |
+|---|---|---|
+| 이하은 | 부하 생성 | `tools/run_load_test.py`, `infra/locust/` |
+| 박정기 | 진단 에이전트 | `app/agent/`, `tools/generate_plan.py` |
+| 최강우 | 스케일링 & 인프라 | `tools/get_metrics.py`, `tools/scale_service.py`, `infra/`, `docker-compose.yml` |
+| 최소명 | API & UI | `app/api/`, `app/static/`, `app/main.py` |
+
+## 커맨드
+
+```bash
+# 의존성 설치
+pip install -r backend/requirements.txt
+
+# 전체 테스트
+pytest tests/
+
+# 역할별 단위 테스트
+pytest tests/unit/test_load_runner.py -v   # 이하은
+pytest tests/unit/test_agent.py -v         # 박정기
+pytest tests/unit/test_metrics.py -v       # 최강우
+pytest tests/unit/test_api.py -v           # 최소명
+
+# FastAPI 백엔드 서버 실행
+cd backend && uvicorn app.main:app --reload --port 8000
+
+# Docker Compose로 전체 인프라 구동
+docker compose up -d
+
+# 개별 서비스 확인
+open http://localhost:8000   # FastAPI + UI
+open http://localhost:8089   # Locust 대시보드
+open http://localhost:9090   # Prometheus
+open http://localhost:3000   # Grafana
+```
+
+## 파일 구조 및 소유권
+
+```
+InfraGuard_Agent
+├── backend
+│   ├── app
+│   │   ├── agent
+│   │   │   ├── engine.py          # 박정기 - ReAct Loop 오케스트레이터
+│   │   │   ├── state.py           # 박정기 - AgentState dataclass
+│   │   │   ├── prompts.py         # 박정기 - 시스템 프롬프트
+│   │   │   └── nodes.py           # 박정기 - LLM reasoning node
+│   │   ├── tools
+│   │   │   ├── run_load_test.py   # 이하은 - Locust 실행 + 결과 파싱
+│   │   │   ├── get_metrics.py     # 최강우 - Prometheus 쿼리
+│   │   │   ├── scale_service.py   # 최강우 - Docker replica 조정
+│   │   │   └── generate_plan.py   # 박정기 - 최적화 플랜 생성
+│   │   ├── api
+│   │   │   └── v1
+│   │   │       └── agent.py       # 최소명 - /start /approve /report
+│   │   ├── static                 # 최소명 - SSE UI + HITL 버튼
+│   │   │   ├── index.html
+│   │   │   ├── main.js
+│   │   │   └── style.css
+│   │   └── main.py                # 최소명 - FastAPI 앱 진입점
+│   ├── Dockerfile
+│   └── requirements.txt
+├── infra
+│   ├── locust
+│   │   ├── locustfile.py          # 이하은 - 부하 시나리오
+│   │   └── locust.conf            # 이하은 - TPS 상한 설정
+│   ├── prometheus
+│   │   └── prometheus.yml         # 최강우
+│   ├── grafana
+│   │   └── dashboard.json         # 최강우
+│   └── target-server              # 최강우 - 부하 받을 샘플 앱
+│       ├── main.py
+│       └── Dockerfile
+├── tests
+│   ├── unit
+│   │   ├── test_load_runner.py    # 이하은
+│   │   ├── test_metrics.py        # 최강우
+│   │   ├── test_agent.py          # 박정기
+│   │   └── test_api.py            # 최소명
+│   └── integration
+│       └── test_e2e.py
+├── docker-compose.yml             # 최강우
+├── .env.example
+├── CLAUDE.md
+├── CONTRIBUTING.md
+└── README.md
+```
+
+## 아키텍처
+
+계층 구조는 단방향 의존성을 따른다:
+`static(SSE UI)` → `api(FastAPI)` → `agent(ReAct Loop)` → `tools` → `infra`
+
+### 핵심 데이터 흐름
+
+```
+run_load_test    →  LoadTestResult(tps, latency_p95, error_rate, duration)
+get_metrics      →  SystemMetrics(cpu_pct, mem_pct, connection_count, timestamp)
+nodes.py(LLM)   →  BottleneckReport(cause, severity, recommendation, confidence)
+scale_service    →  ScalingResult(before_replicas, after_replicas, success)
+```
+
+### State 구조 (state.py)
+
+```python
+@dataclass
+class AgentState:
+    task_id: str
+    target_tps: int
+    duration: int
+    load_test_result: LoadTestResult | None = None
+    system_metrics: SystemMetrics | None = None
+    bottleneck_report: BottleneckReport | None = None
+    scaling_approved: bool = False
+    agent_outcome: str = "pending"   # pending | diagnosed | scaled | failed
+    loop_count: int = 0
+```
+
+### API 명세
+
+| 메서드 | 경로 | 담당 | 설명 |
+|---|---|---|---|
+| POST | `/api/v1/agent/start` | 최소명 | TPS·duration 수신, 에이전트 루프 시작, SSE 스트리밍 |
+| POST | `/api/v1/agent/approve` | 최소명 | HITL 스케일링 승인 |
+| GET | `/api/v1/agent/report/{task_id}` | 최소명 | 최종 종합 분석 리포트 반환 |
+
+## HITL(Human-In-The-Loop) 지점
+
+반드시 사람 승인을 받아야 하는 지점:
+
+1. **컨테이너 스케일링 실행 전** — `replica를 2→4로 늘리겠습니다. 실행할까요?`
+2. **진단 결과 불확실 시** — LLM confidence < 0.6이면 추가 정보 요청
+3. **외부 비용 발생 작업** — 클라우드 프로비저닝은 MVP 범위 밖, 로컬 Docker만
+
+HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병목 진단
+
+## 가드레일
+
+- `MAX_LOOP = 10` — ReAct Loop 최대 반복 횟수. 초과 시 `agent_outcome = "failed"` 처리
+- Locust 부하 상한 **50 TPS** — 로컬 환경 CPU 고갈 방지 (`locust.conf`로 관리)
+- `scale_service` replica 최대 **8개**
+- 에이전트 루프 `asyncio.timeout(300)` — 5분 초과 시 강제 종료
+
+## LLM 설정
+
+- 모델: **Solar Pro** (Upstage)
+- Tool Use 방식: ReAct Loop (Thought → Action → Observation 반복)
+- 관측성: **Langfuse** 트레이싱 — 모든 LLM 호출 추적
+- 평가: **LLM-as-Judge** — 최종 병목 진단 리포트 정확성 정량 검증
+
+## 환경변수 (.env)
+
+```bash
+UPSTAGE_API_KEY=        # Solar Pro API 키 (필수)
+LANGFUSE_SECRET_KEY=    # Langfuse 트레이싱 (선택)
+LANGFUSE_PUBLIC_KEY=
+PROMETHEUS_URL=http://localhost:9090
+MAX_LOOP=10
+TARGET_SERVER_URL=http://localhost:8080
+```
+
+## 테스트 작성 시 주의사항
+
+- Locust Tool 테스트는 `subprocess.Popen` Mock으로 처리 (실제 Locust 프로세스 실행 X)
+- Prometheus 쿼리 테스트는 `httpx.MockTransport`로 HTTP 목킹
+- Docker Compose 제어 테스트는 `docker` SDK Mock 사용
+- 모든 테스트는 `tmp_path` 픽스처 사용 (`tempfile.TemporaryDirectory` 대신)
+
+## Out of Scope (건드리지 말 것)
+
+- 실제 AWS/GCP 클라우드 프로비저닝 — 로컬 Docker로만 증명
+- Kubernetes HPA 연동 — Docker Compose 수준에서 먼저 구현
+- 멀티 에이전트 구조 — 단일 ReAct Loop MVP 완성 후 확장
+- 실시간 FinOps 비용 최적화 — 2단계 목표
