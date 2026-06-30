@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InfraGuard Agent Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <h1>🛡️ InfraGuard Agent 제어 대시보드</h1>
+        <p>인프라 자율 진단 및 스케일링 에이전트 시스템</p>
+
+        <!-- ================= Agent Status ================= -->
+
+        <div class="status-panel">
+            <span>Agent Status</span>
+            <span id="agent-status" class="status ready">
+                🟢 READY
+            </span>
+        </div>
+
+        <!-- ================= Progress Timeline ================= -->
+
+        <div class="progress-timeline">
+
+            <div id="step-load" class="timeline-step">
+                <div class="timeline-circle">⚡</div>
+                <span>Load Test</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-metric" class="timeline-step">
+                <div class="timeline-circle">📊</div>
+                <span>Metrics</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-ai" class="timeline-step">
+                <div class="timeline-circle">🧠</div>
+                <span>AI Analysis</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-plan" class="timeline-step">
+                <div class="timeline-circle">📋</div>
+                <span>Plan</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-approval" class="timeline-step">
+                <div class="timeline-circle">⚠️</div>
+                <span>Approval</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-scale" class="timeline-step">
+                <div class="timeline-circle">🚀</div>
+                <span>Scale-Out</span>
+            </div>
+
+            <div class="timeline-line"></div>
+
+            <div id="step-report" class="timeline-step">
+                <div class="timeline-circle">📄</div>
+                <span>Report</span>
+            </div>
+
+        </div>
+
+        <!-- ================= Control ================= -->
+
+        <div class="control-panel">
+            <button id="start-btn">
+                자율 진단 및 부하 테스트 시작
+            </button>
+        </div>
+
+        <!-- ================= Log ================= -->
+
+        <div class="log-container">
+
+            <h3 class="terminal-title">
+                🤖 에이전트 실시간 분석 로그 (SSE)
+            </h3>
+
+            <div id="log-window" class="log-window">
+                <div class="log-entry system">
+                    시스템 대기 중...
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ================= Approval ================= -->
+
+        <div id="approval-modal" class="hidden">
+
+            <h3>⚠️ 인프라 조치 승인 요청</h3>
+
+            <p id="modal-message"></p>
+
+            <div class="modal-buttons">
+
+                <button id="approve-btn">
+                    승인 (Scale-out)
+                </button>
+
+                <button id="reject-btn">
+                    거절
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <script src="main.js"></script>
+
+</body>
+
+</html>
