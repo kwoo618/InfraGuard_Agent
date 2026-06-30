@@ -34,7 +34,7 @@ body{
     padding:40px 20px;
 }
 
-/* ---------- 메인 ---------- */
+
 
 .container{
 
@@ -63,7 +63,7 @@ h1{
     margin-bottom:25px;
 }
 
-/* ---------- 버튼 ---------- */
+
 
 button{
 
@@ -90,7 +90,6 @@ button:active{
     transform:scale(.98);
 }
 
-/* ---------- 시작버튼 ---------- */
 
 #start-btn{
 
@@ -109,7 +108,7 @@ button:active{
     background:#30363d;
 }
 
-/* ---------- 로그 ---------- */
+
 
 .terminal-title{
 
@@ -139,7 +138,7 @@ button:active{
     margin-bottom:25px;
 }
 
-/* ---------- 로그 색상 ---------- */
+
 
 .log-entry{
     margin-bottom:8px;
@@ -166,7 +165,7 @@ button:active{
     color:#ff7b72;
 }
 
-/* ---------- 승인 카드 ---------- */
+
 
 #approval-modal{
 
@@ -295,9 +294,7 @@ button:active{
 }
 
 
-/* =======================================================
-   Progress
-======================================================= */
+
 
 .progress-panel {
 

@@ -5,15 +5,10 @@ const modalMessage = document.getElementById('modal-message');
 const approveBtn = document.getElementById('approve-btn');
 const rejectBtn = document.getElementById('reject-btn');
 
-// =======================
-// Agent Status
-// =======================
+
 
 const statusLabel = document.getElementById("agent-status");
 
-// =======================
-// Progress
-// =======================
 
 const steps = [
     "step-load",
@@ -28,9 +23,7 @@ const steps = [
 let currentTaskId = null;
 let eventSource = null;
 
-// =======================
-// Log
-// =======================
+
 
 function appendLog(message, type = 'info') {
 
@@ -63,9 +56,7 @@ function appendLog(message, type = 'info') {
     logWindow.scrollTop = logWindow.scrollHeight;
 }
 
-// =======================
-// Status
-// =======================
+
 
 function updateStatus(text, cls) {
 
@@ -74,9 +65,6 @@ function updateStatus(text, cls) {
 
 }
 
-// =======================
-// Progress
-// =======================
 
 function activateStep(id) {
 
@@ -107,9 +95,7 @@ function resetProgress() {
 
 }
 
-// =======================
-// Start Button
-// =======================
+
 
 startBtn.addEventListener('click', () => {
 
@@ -131,9 +117,7 @@ startBtn.addEventListener('click', () => {
 
         const data = JSON.parse(event.data);
 
-        // ===================
-        // Running
-        // ===================
+    
 
         if (data.status === 'running') {
 
@@ -145,9 +129,6 @@ startBtn.addEventListener('click', () => {
 
         }
 
-        // ===================
-        // AI Analysis
-        // ===================
 
         else if (data.status === 'analyzing') {
 
@@ -159,9 +140,7 @@ startBtn.addEventListener('click', () => {
 
         }
 
-        // ===================
-        // Approval
-        // ===================
+        
 
         else if (data.status === 'need_approval') {
 
@@ -201,9 +180,7 @@ startBtn.addEventListener('click', () => {
 
 });
 
-// =======================
-// Approve
-// =======================
+
 
 approveBtn.addEventListener('click', async () => {
 
@@ -274,9 +251,7 @@ approveBtn.addEventListener('click', async () => {
 
 });
 
-// =======================
-// Reject
-// =======================
+
 
 rejectBtn.addEventListener('click', async () => {
 
