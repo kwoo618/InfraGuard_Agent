@@ -54,7 +54,7 @@ InfraGuard_Agent
 │   ├── app
 │   │   ├── agent
 │   │   │   ├── engine.py          # 박정기 - ReAct Loop 오케스트레이터
-│   │   │   ├── state.py           # 박정기 - AgentState dataclass
+│   │   │   ├── state.py           # 박정기 - Agent 런타임 상태 정의
 │   │   │   ├── prompts.py         # 박정기 - 시스템 프롬프트
 │   │   │   └── nodes.py           # 박정기 - LLM reasoning node
 │   │   ├── tools
@@ -115,17 +115,47 @@ scale_service    →  ScalingResult(before_replicas, after_replicas, success)
 ### State 구조 (state.py)
 
 ```python
-@dataclass
-class AgentState:
+from typing import Literal, TypedDict
+
+from app.schemas import (
+    BottleneckReport,
+    LoadTestResult,
+    ScalingResult,
+    SystemMetrics,
+)
+
+
+AgentOutcome = Literal[
+    "pending",
+    "diagnosed",
+    "awaiting_approval",
+    "scaled",
+    "failed",
+]
+
+
+class AgentRuntimeState(TypedDict):
     task_id: str
     target_tps: int
     duration: int
-    load_test_result: LoadTestResult | None = None
-    system_metrics: SystemMetrics | None = None
-    bottleneck_report: BottleneckReport | None = None
-    scaling_approved: bool = False
-    agent_outcome: str = "pending"   # pending | diagnosed | scaled | failed
-    loop_count: int = 0
+
+    load_test_result: LoadTestResult | None
+    system_metrics: SystemMetrics | None
+    bottleneck_report: BottleneckReport | None
+
+    agent_outcome: AgentOutcome
+
+    scaling_plan: dict[str, object] | None
+    scaling_required: bool
+    scaling_approved: bool | None
+    waiting_for_approval: bool
+    scaling_result: ScalingResult | None
+
+    loop_count: int
+    scaling_count: int
+
+    final_answer: str | None
+    error: str | None
 ```
 
 ### API 명세

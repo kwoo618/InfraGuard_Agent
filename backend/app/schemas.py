@@ -52,18 +52,3 @@ class ScalingResult:
     after_replicas: int
     success: bool
     error_message: str | None = None
-
-
-@dataclass
-class AgentState:
-    """박정기 - ReAct Loop 전체 상태"""
-    task_id: str
-    target_tps: int
-    duration: int
-    load_test_result: LoadTestResult | None = None
-    system_metrics: SystemMetrics | None = None
-    bottleneck_report: BottleneckReport | None = None
-    scaling_approved: bool = False
-    scaling_result: ScalingResult | None = None
-    agent_outcome: str = "pending"   # pending | diagnosed | awaiting_approval | scaled | failed
-    loop_count: int = 0
