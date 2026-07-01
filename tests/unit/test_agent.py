@@ -2,38 +2,11 @@ import pytest
 from dataclasses import dataclass
 from datetime import datetime
 
-# 테스트 내부에서 임시 구조체 선언 (backend.app.agent 에러 방지)
-@dataclass
-class LoadTestResult:
-    tps: float
-    latency_p95: float
-    error_rate: float
-    duration: int
-
-@dataclass
-class SystemMetrics:
-    cpu_pct: float
-    mem_pct: float
-    connection_count: int
-    timestamp: str
-
-@dataclass
-class BottleneckReport:
-    cause: str
-    severity: str
-    recommendation: str
-    confidence: float
-
-@dataclass
-class ScalingResult:
-    before_replicas: int
-    after_replicas: int
-    success: bool
 
 
 # 1. 요구사항 규격 검증 테스트
 def test_project_dataclass_specs():
-    load_test = LoadTestResult(tps=350.5, latency_p95=120.0, error_rate=0.02, duration=60)
+    load_test = LoadTestResult(tps=350.5, latency_p95=120.0, error_rate=0.02, duration=60, latency_avg=40.0, total_requests=100)
     assert load_test.tps == 350.5
 
     metrics = SystemMetrics(cpu_pct=92.5, mem_pct=78.0, connection_count=1500, timestamp=str(datetime.now()))
