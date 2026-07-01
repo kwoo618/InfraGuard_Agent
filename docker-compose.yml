@@ -2,7 +2,8 @@ services:
   target-server:
     build:
       context: ./infra/target-server
-    container_name: infraguard-target-server
+    # container_name 제거 — --scale 동작을 위해 필수
+    # container_name이 있으면 Docker가 복제를 거부함
     ports:
       - "8080-8089:8080"
     healthcheck:
@@ -29,9 +30,10 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
+      # 윈도우 Docker Desktop 호환 경로
+      - //var/run/docker.sock:/var/run/docker.sock:ro
+      - //sys:/sys:ro
+      - //var/lib/docker/:/var/lib/docker:ro
     privileged: true
 
   grafana:
