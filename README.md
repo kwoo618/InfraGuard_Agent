@@ -36,7 +36,7 @@ InfraGuard_Agent
 │   ├── app
 │   │   ├── agent
 │   │   │   ├── engine.py          # ReAct Loop 오케스트레이터
-│   │   │   ├── state.py           # AgentState dataclass
+│   │   │   ├── state.py           # Agent 런타임 상태 정의
 │   │   │   ├── prompts.py         # 시스템 프롬프트
 │   │   │   └── nodes.py           # LLM reasoning node
 │   │   ├── tools
