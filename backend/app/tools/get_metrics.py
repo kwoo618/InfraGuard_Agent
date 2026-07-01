@@ -6,13 +6,16 @@ get_metrics — Prometheus에 현재 시스템 상태를 물어보고 SystemMetr
 
 동작 순서:
 1. Prometheus HTTP API(/api/v1/query)에 PromQL 쿼리를 날린다.
-2. cpu_pct, mem_pct, connection_count를 각각 따로 쿼리한다.
+2. 요청 처리량(TPS), P95 응답시간, 활성 connection 수를 각각 쿼리한다.
 3. 응답 JSON에서 숫자만 뽑아 SystemMetrics(schemas.py)로 포장해 반환한다.
 
 주의:
-- 컨테이너 이름은 target-server 컨테이너 1개를 기준으로 한다.
-  스케일링으로 컨테이너가 여러 개가 되면 평균값으로 집계한다.
-- Prometheus가 아직 데이터를 못 모았거나(컨테이너 막 시작) 쿼리 결과가 비어있으면
+- 윈도우 Docker Desktop 환경에서 cAdvisor가 name 라벨을 붙이지 않아
+  컨테이너별 CPU/메모리 필터링이 불가능하다.
+- 대신 target-server가 /metrics로 직접 노출하는 애플리케이션 레벨 메트릭을 사용한다.
+  (prometheus-fastapi-instrumentator 제공)
+- cpu_pct, mem_pct는 0.0으로 고정 반환한다. 향후 리눅스 환경에서 cAdvisor 연동 시 교체.
+- Prometheus가 아직 데이터를 못 모았거나 쿼리 결과가 비어있으면
   0.0 / 0으로 안전하게 기본값 처리한다 (예외로 죽이지 않는다).
 """
 
@@ -25,9 +28,6 @@ from app.schemas import SystemMetrics
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 QUERY_TIMEOUT_SECONDS = 5.0
 
-# cAdvisor가 컨테이너에 붙이는 이름 필터. docker-compose.yml의 container_name과 맞춘다.
-TARGET_CONTAINER_FILTER = 'name=~"infraguard-target-server.*"'
-
 
 async def _query_prometheus(promql: str) -> float:
     """
@@ -39,8 +39,10 @@ async def _query_prometheus(promql: str) -> float:
     try:
         async with httpx.AsyncClient(timeout=QUERY_TIMEOUT_SECONDS) as client:
             response = await client.get(url, params={"query": promql})
-            response.raise_for_status()
     except httpx.HTTPError:
+        return 0.0
+
+    if response.status_code != 200:
         return 0.0
 
     data = response.json()
@@ -60,30 +62,21 @@ async def _query_prometheus(promql: str) -> float:
 
 async def get_system_metrics() -> SystemMetrics:
     """
-    target-server 컨테이너의 CPU 사용률, 메모리 사용률, 활성 connection 수를
-    Prometheus(+cAdvisor)에서 조회해 SystemMetrics로 반환한다.
+    target-server의 애플리케이션 레벨 메트릭을 Prometheus에서 조회해 SystemMetrics로 반환한다.
+
+    cpu_pct / mem_pct: 윈도우 Docker Desktop 환경에서 cAdvisor name 라벨 미지원으로 0.0 고정.
+                       리눅스 환경에서는 container_cpu_usage_seconds_total 쿼리로 교체 가능.
+    connection_count: 현재 처리 중인 요청 수 (병목 판단의 핵심 지표).
     """
 
-    # CPU 사용률(%) — cAdvisor가 주는 누적 CPU 시간을 1분 단위 증가율로 변환 후 백분율화
-    cpu_query = (
-        f'avg(rate(container_cpu_usage_seconds_total{{{TARGET_CONTAINER_FILTER}}}[1m])) * 100'
-    )
+    # 현재 처리 중인 요청 수 — Semaphore 한도(5)에 얼마나 근접했는지 보여주는 핵심 지표
+    # "or vector(0)": 데이터 없을 때 0 보장
+    connection_query = "sum(http_requests_in_progress) or vector(0)"
 
-    # 메모리 사용률(%) — 사용 중인 메모리 / 메모리 상한 (limit이 없으면 0으로 나와 0% 처리됨)
-    mem_query = (
-        f'avg(container_memory_usage_bytes{{{TARGET_CONTAINER_FILTER}}} '
-        f'/ container_spec_memory_limit_bytes{{{TARGET_CONTAINER_FILTER}}}) * 100'
-    )
-
-    # 활성 connection 수 — target-server의 /metrics가 노출하는 처리 중인 요청 수
-    connection_query = "sum(http_requests_in_progress)"
-
-    cpu_pct = await _query_prometheus(cpu_query)
-    mem_pct = await _query_prometheus(mem_query)
     connection_count = await _query_prometheus(connection_query)
 
     return SystemMetrics(
-        cpu_pct=round(cpu_pct, 2),
-        mem_pct=round(mem_pct, 2),
+        cpu_pct=0.0,      # TODO: 리눅스 환경에서 cAdvisor 연동 시 교체
+        mem_pct=0.0,      # TODO: 리눅스 환경에서 cAdvisor 연동 시 교체
         connection_count=int(connection_count),
     )
