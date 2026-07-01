@@ -28,7 +28,10 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     container_name: infraguard-cadvisor
     ports:
-      - "8081:8080"
+      # target-server가 --scale 시 호스트 포트 8080-8089를 사용하므로
+      # cAdvisor는 그 범위 밖(8090)으로 옮겨 충돌을 피한다.
+      # (기존 8081은 scale된 target-server replica와 겹쳐 8082로 밀리는 문제 발생)
+      - "8090:8080"
     volumes:
       # 윈도우 Docker Desktop 호환 경로
       - //var/run/docker.sock:/var/run/docker.sock:ro

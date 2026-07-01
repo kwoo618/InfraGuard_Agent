@@ -4,6 +4,18 @@ global:
 
 scrape_configs:
   # target-server 자체 메트릭 (FastAPI에 prometheus-fastapi-instrumentator 적용 시)
+  #
+  # 주의(scale 대응): 아래 static_configs는 "target-server:8080" 단일 타깃이라
+  # --scale로 replica가 N개가 되면 Docker 내장 DNS의 라운드로빈 때문에
+  # 매 scrape가 replica 1개만 긁는다 → sum(http_requests_in_progress)가 스케일 후 과소집계됨.
+  # MVP는 단일 replica 진단 기준이라 현행 유지. 다중 replica를 정확히 집계하려면
+  # 아래 dns_sd_configs로 교체해 모든 replica IP를 개별 타깃으로 디스커버리한다:
+  #   - job_name: "target-server"
+  #     dns_sd_configs:
+  #       - names: ["target-server"]
+  #         type: A
+  #         port: 8080
+  #         refresh_interval: 5s
   - job_name: "target-server"
     static_configs:
       - targets: ["target-server:8080"]
