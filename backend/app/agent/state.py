@@ -1,6 +1,5 @@
 from typing import Literal, TypedDict
-from uuid import uuid4,UUID
-import pytest
+from uuid import uuid4
 
 from app.schemas import (
     BottleneckReport,
@@ -17,7 +16,7 @@ AgentOutcome = Literal[
     "failed",
 ]
 
-class AgentState(TypedDict):
+class AgentRuntimeState(TypedDict):
 
     # 각 진단 작업을 구분하기 위한 고유 식별자
     # 예: "7a09c994-2090-4d50-b01b-e508ef16731f"
@@ -79,14 +78,14 @@ class AgentState(TypedDict):
 def create_initial_state(
     target_tps: int,
     duration: int,
-) -> AgentState:
+) -> AgentRuntimeState:
     if target_tps <= 0:
         raise ValueError("target_tps는 1 이상이어야 합니다.")
 
     if duration <= 0:
         raise ValueError("duration은 1초 이상이어야 합니다.")
     
-    return AgentState(
+    return AgentRuntimeState(
 
         task_id=str(uuid4()),
         target_tps=target_tps,
