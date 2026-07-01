@@ -39,7 +39,7 @@ from app.tools.get_metrics import get_system_metrics
 from app.tools.run_load_test import run_load_test
 from app.tools.scale_service import (
     SERVICE_NAME,
-    _get_current_replica_count,
+    get_current_replicas,
     scale_service,
 )
 
@@ -56,7 +56,7 @@ UPSTAGE_MODEL = os.getenv(
 )
 
 # ReAct Loop의 무한 반복을 막기 위한 상한
-MAX_LOOP_COUNT = int(os.getenv("MAX_LOOP_COUNT", "5"))
+MAX_LOOP = int(os.getenv("MAX_LOOP", "10"))
 
 
 # 테스트에서 실제 API 대신 Mock 함수를 전달할 수 있도록 정의한 타입
@@ -90,7 +90,7 @@ def _get_current_replicas() -> int:
     프롬프트 생성을 위해 최소값 1을 사용한다.
     """
 
-    replica_count = _get_current_replica_count()
+    replica_count = get_current_replicas()
     return max(replica_count, 1)
 
 
@@ -468,9 +468,9 @@ async def llm_reasoning_node(
     """
 
     try:
-        if state["loop_count"] >= MAX_LOOP_COUNT:
+        if state["loop_count"] >= MAX_LOOP:
             raise NodeExecutionError(
-                f"최대 ReAct Loop 횟수({MAX_LOOP_COUNT})에 도달했습니다."
+                f"최대 ReAct Loop 횟수({MAX_LOOP})에 도달했습니다."
             )
 
         load_test_result = state["load_test_result"]
