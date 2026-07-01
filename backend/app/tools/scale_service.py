@@ -66,6 +66,18 @@ def _get_current_replica_count() -> int:
     return len(container_ids)
 
 
+def get_current_replicas() -> int:
+    """target-server의 현재 실행 중 replica 수를 반환하는 공개 헬퍼.
+
+    소비자: 박정기 (agent/nodes.py) — 병목 분석 프롬프트의 current_replicas 인자와
+    스케일링 목표(desired_replicas) 계산에 현재 replica 수가 필요하다.
+    내부 구현(_get_current_replica_count)을 감싸 팀 외부에 안정적인 이름으로 노출한다.
+
+    Docker가 꺼져 있거나 조회 실패 시 0을 반환한다(예외로 루프를 막지 않음).
+    """
+    return _get_current_replica_count()
+
+
 async def scale_service(target_replicas: int) -> ScalingResult:
     """
     target-server를 target_replicas 개수로 스케일링한다.

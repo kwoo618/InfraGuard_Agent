@@ -124,3 +124,26 @@ async def test_scale_service_docker_command_fails():
 
     assert result.success is False
     assert "no such service" in result.error_message
+
+
+# ── 테스트 5: 공개 헬퍼 get_current_replicas ──────────────────────────────────
+
+def test_get_current_replicas_returns_count():
+    """
+    get_current_replicas()가 현재 실행 중인 replica 수를 반환한다.
+    (박정기 engine이 프롬프트의 current_replicas 값을 얻는 통합 API)
+    """
+    run_results = iter(_ps_sequence(3))
+
+    with patch.object(ss_module.subprocess, "run", side_effect=run_results):
+        count = ss_module.get_current_replicas()
+
+    assert count == 3
+
+
+def test_get_current_replicas_zero_when_docker_down():
+    """Docker가 꺼져 있으면(FileNotFoundError) 0을 반환한다 (예외로 죽지 않음)."""
+    with patch.object(ss_module.subprocess, "run", side_effect=FileNotFoundError):
+        count = ss_module.get_current_replicas()
+
+    assert count == 0

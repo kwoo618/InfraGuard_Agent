@@ -10,6 +10,7 @@ import asyncio
 import random
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(title="InfraGuard Target Server")
@@ -53,9 +54,13 @@ async def heavy():
 async def flaky():
     """
     가끔 에러를 내는 엔드포인트 — error_rate 메트릭 테스트용.
+
+    주의: FastAPI에서 `return {...}, 500` 튜플은 상태코드로 해석되지 않고
+    본문으로 직렬화되어 200이 나간다. 실제 500을 내려면 JSONResponse로
+    status_code를 명시해야 error_rate/Locust Failure Count가 잡힌다.
     """
     if random.random() < 0.05:
-        return {"status": "error", "code": 500}, 500
+        return JSONResponse(status_code=500, content={"status": "error", "code": 500})
     await asyncio.sleep(0.05)
     return {"status": "ok", "type": "flaky"}
 
