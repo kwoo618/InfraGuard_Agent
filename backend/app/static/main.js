@@ -146,6 +146,35 @@ startBtn.addEventListener('click', () => {
             activateStep("step-approval");
             updateStatus("🟠 WAITING APPROVAL", "waiting");
             approvalModal.classList.remove("hidden");
+            // 승인 대기 중에도 서버가 결과를 이어서 보내줘야 하므로 연결을 끊지 않는다.
+        }
+
+        // scale_service 호출 중 백엔드가 보내는 진행 상태
+        else if (data.status === 'scaling') {
+            appendLog(data.message, 'info');
+            completeStep("step-approval");
+            activateStep("step-scale");
+            updateStatus("🟣 SCALING", "scaling");
+        }
+
+        // scale_service 결과 success=True → 최종 완료
+        else if (data.status === 'done') {
+            appendLog(data.message, 'success');
+            completeStep("step-scale");
+            activateStep("step-report");
+            completeStep("step-report");
+            updateStatus("🟢 COMPLETED", "completed");
+            startBtn.disabled = false;
+            eventSource.close();
+        }
+
+        // agent.py가 보내는 모든 실패 케이스(인프라 다운, 부하테스트 실패,
+        // 승인 거절, scale_service 실패)는 status: 'failed'로 통일되어 온다.
+        else if (data.status === 'failed') {
+            appendLog(data.message, 'error');
+            updateStatus("🔴 ERROR", "error");
+            approvalModal.classList.add("hidden");
+            startBtn.disabled = false;
             eventSource.close();
         }
     };
@@ -194,31 +223,9 @@ approveBtn.addEventListener('click', async () => {
 
         approvalModal.classList.add('hidden');
 
-        completeStep("step-approval");
-
-        activateStep("step-scale");
-
-        updateStatus("🟣 SCALING", "scaling");
-
-        setTimeout(() => {
-
-            completeStep("step-scale");
-
-            activateStep("step-report");
-
-            setTimeout(() => {
-
-                completeStep("step-report");
-
-                updateStatus("🟢 COMPLETED", "completed");
-
-                appendLog("최종 리포트 생성 완료.", "success");
-
-                startBtn.disabled = false;
-
-            }, 700);
-
-        }, 1000);
+        // 이후 진행 상황(스케일링 → 완료/실패)은 이미 열려 있는 SSE 스트림의
+        // 'scaling' / 'done' / 'failed' 이벤트에서 실시간으로 갱신된다.
+        // (scale_service.py 실제 실행 결과를 그대로 반영)
 
     }
 
@@ -259,13 +266,10 @@ rejectBtn.addEventListener('click', async () => {
 
         });
 
-        appendLog("유저가 인프라 조치를 거절했습니다.", "error");
-
         approvalModal.classList.add("hidden");
 
-        updateStatus("🔴 REJECTED", "error");
-
-        startBtn.disabled = false;
+        // agent.py가 승인 거절을 감지하면 status: 'failed' 이벤트를 스트리밍으로
+        // 보내주므로, 최종 로그/상태 갱신은 위 eventSource.onmessage에서 처리한다.
 
     }
 
