@@ -5,9 +5,8 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from app.agent.state import create_initial_state
+from app.agent.state import create_initial_state, AgentRuntimeState
 from app.tools.run_load_test import run_load_test, LoadTestError
-from app.schemas import AgentState
 from app.tools.scale_service import scale_service
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
@@ -20,10 +19,10 @@ executor = ThreadPoolExecutor(max_workers=3)
 # =================================================================
 class AgentTaskManager:
     def __init__(self):
-        self.states: dict[str, AgentState] = {}
+        self.states: dict[str, AgentRuntimeState] = {}
         self.futures: dict[str, asyncio.Future] = {}
 
-    def register_task(self, state: AgentState) -> str:
+    def register_task(self, state: AgentRuntimeState) -> str:
         task_id = state["task_id"]
 
         self.states[task_id] = state
@@ -90,6 +89,54 @@ async def approve_task(req: ApprovalRequest):
 
 
 # =================================================================
+# 📄 [GET] 최종 리포트 조회 엔드포인트
+# =================================================================
+@router.get("/agent/report/{task_id}")
+async def get_report(task_id: str):
+    """
+    지금까지의 측정값(부하 테스트 결과)과 실제로 취해진 조치(스케일링 결과)를
+    함께 반환합니다. 진단이 끝나지 않았어도(진행 중이어도) 그 시점까지의
+    값을 그대로 보여줍니다.
+    """
+    state = task_manager.states.get(task_id)
+
+    if state is None:
+        raise HTTPException(status_code=404, detail="해당 task_id를 찾을 수 없습니다.")
+
+    load_test_result = state.get("load_test_result")
+    scaling_result = state.get("scaling_result")
+
+    measurement = None
+    if load_test_result is not None:
+        measurement = {
+            "tps": load_test_result.tps,
+            "error_rate": load_test_result.error_rate,
+            "latency_p95": load_test_result.latency_p95,   # ms
+            "latency_avg": load_test_result.latency_avg,   # ms
+            "total_requests": load_test_result.total_requests,
+            "duration": load_test_result.duration,          # 초
+        }
+
+    action = None
+    if scaling_result is not None:
+        action = {
+            "before_replicas": scaling_result.before_replicas,
+            "after_replicas": scaling_result.after_replicas,
+            "success": scaling_result.success,
+            "error_message": scaling_result.error_message,
+        }
+
+    return {
+        "task_id": task_id,
+        "outcome": state.get("agent_outcome"),           # diagnosed / awaiting_approval / scaled / failed 등
+        "waiting_for_approval": state.get("waiting_for_approval", False),
+        "measurement": measurement,                       # 부하 테스트 실측값 (없으면 None = 아직 측정 전)
+        "action": action,                                  # 실제 스케일링 조치 결과 (없으면 None = 아직 조치 전)
+        "error": state.get("error"),
+    }
+
+
+# =================================================================
 # 📤 [GET] 실시간 진단 로그 스트리밍 엔드포인트
 # =================================================================
 @router.get("/agent/start")
@@ -108,11 +155,11 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     인프라 자율 진단 및 조치 프로세스를 실시간으로 스트리밍하는 핵심 로직.
     """
     
-    # 1. AgentState 데이터 초기화
+    # 1. AgentRuntimeState 데이터 초기화
     try:
         state = create_initial_state(target_tps=target_tps, duration=duration)
     except ValueError as e:
-        yield f"data: {{\"status\": \"failed\", \"message\": \"[입력 에러] {str(e)}\"}}\n\n"
+        yield f"data: {{\"status\": \"failed\", \"task_id\": null, \"message\": \"[입력 에러] {str(e)}\"}}\n\n"
         return
 
     task_id = task_manager.register_task(state)
@@ -127,10 +174,10 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
         try:
             response = await client.get("http://localhost:9090/", timeout=3.0)
             if response.status_code not in [200, 302]:
-                yield f"data: {{\"status\": \"failed\", \"message\": \"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})\"}}\n\n"
+                yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})\"}}\n\n"
                 return
         except (httpx.ConnectError, httpx.TimeoutException):
-            yield f"data: {{\"status\": \"failed\", \"message\": \"❌ [에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요.\"}}\n\n"
+            yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ [에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요.\"}}\n\n"
             return
 
     yield f"data: {{\"status\": \"running\", \"task_id\": \"{task_id}\", \"message\": \"🟢 로컬 도커 인프라 연결 확인 완료!\"}}\n\n"
@@ -160,7 +207,21 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     except LoadTestError as e:
         state["agent_outcome"] = "failed"
         state["error"] = str(e)
-        yield f"data: {{\"status\": \"failed\", \"message\": \"❌ [부하 테스트 실패] {str(e)}\"}}\n\n"
+        yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ [부하 테스트 실패] {str(e)}\"}}\n\n"
+        return
+
+    except Exception as e:
+        # LoadTestError로 분류되지 않은 예외(예: Locust 실행 환경 문제, subprocess 오류 등).
+        # 여기서 안 잡으면 generator 전체가 죽어서 SSE 연결이 비정상 종료되고,
+        # 프론트는 원인을 알 수 없는 "도커 다운" 메시지만 보게 된다.
+        import traceback
+        traceback.print_exc()  # uvicorn 콘솔에 실제 스택트레이스 출력
+
+        state["agent_outcome"] = "failed"
+        state["error"] = str(e)
+
+        safe_message = str(e).replace('"', "'").replace("\n", " ")
+        yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ [부하 테스트 중 예외 발생] {safe_message}\"}}\n\n"
         return
 
 
@@ -188,7 +249,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     if not approved:
         state["waiting_for_approval"] = False
         state["agent_outcome"] = "failed"
-        yield f"data: {{\"status\": \"failed\", \"message\": \"❌ 사용자가 스케일아웃 조치를 거절했습니다. 프로세스를 중단합니다.\"}}\n\n"
+        yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ 사용자가 스케일아웃 조치를 거절했습니다. 프로세스를 중단합니다.\"}}\n\n"
         return
 
 
@@ -209,7 +270,27 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
 
     print("=== scale_service 호출 직전 ===")
 
-    result = await scale_service(target_replicas)
+    try:
+        result = await scale_service(target_replicas)
+    except Exception as e:
+        # scale_service 내부에서 못 잡은 예외(예상 못한 OSError 등).
+        # 여기서 안 잡으면 generator가 죽어서 SSE 연결이 비정상 종료되고,
+        # 프론트는 원인을 알 수 없는 "도커 다운" 메시지만 보게 된다.
+        import traceback
+        traceback.print_exc()
+
+        state["agent_outcome"] = "failed"
+        state["error"] = str(e)
+
+        safe_message = str(e).replace('"', "'").replace("\n", " ")
+        yield (
+            f"data: {{"
+            f"\"status\":\"failed\","
+            f"\"task_id\":\"{task_id}\","
+            f"\"message\":\"❌ [스케일링 중 예외 발생] {safe_message}\""
+            f"}}\n\n"
+        )
+        return
 
     print(result)
 
