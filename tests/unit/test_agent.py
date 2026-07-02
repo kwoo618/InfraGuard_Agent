@@ -1,11 +1,14 @@
+from __future__ import annotations
 import pytest
 from datetime import datetime
+import json
 
 # 1. 상단 임시 클래스 제거 후 app.schemas에서 실제 정의된 규격 모델 임포트
 from app.schemas import (
     LoadTestResult,
     ScalingResult,
     SystemMetrics,
+    BottleneckReport,
 )
 
 # 1. 요구사항 규격 검증 테스트 (실제 6개 필수 인자 규격 준수)
@@ -78,22 +81,7 @@ def test_guardrail_constraints():
     assert current_loop == MAX_LOOP
 
 # nodes.py 단위 테스트
-import pytest
-import httpx
-
-from app.agent.nodes import (
-    collect_metrics_node,
-    execute_scaling_node,
-    llm_reasoning_node,
-    run_load_test_node,
-)
-from app.agent.state import create_initial_state
-from app.schemas import (
-    LoadTestResult,
-    ScalingResult,
-    SystemMetrics,
-)
-
+from app.agent.state import create_initial_state, AgentRuntimeState
 
 @pytest.mark.asyncio
 async def test_run_load_test_node_success():
@@ -549,13 +537,6 @@ from app.agent.nodes import (
     llm_reasoning_node,
     run_load_test_node,
 )
-from app.agent.state import create_initial_state
-from app.schemas import (
-    LoadTestResult,
-    ScalingResult,
-    SystemMetrics,
-)
-
 
 @pytest.mark.asyncio
 async def test_nodes_full_flow(monkeypatch):
@@ -1103,3 +1084,1121 @@ def test_validate_scaling_plan_rejects_non_increasing_replicas(
             current_replicas=1,
             requires_scaling=True,
         )
+# engine.py 단위 테스트
+
+import asyncio
+
+import app.agent.engine as engine
+
+
+def _engine_load_result(
+    *,
+    tps: float = 30.0,
+    latency_p95: float = 900.0,
+) -> LoadTestResult:
+    """Engine 테스트에서 공통으로 사용하는 부하 테스트 결과."""
+
+    return LoadTestResult(
+        tps=tps,
+        latency_p95=latency_p95,
+        latency_avg=latency_p95 / 2,
+        error_rate=0.02,
+        duration=30,
+        total_requests=int(tps * 30),
+    )
+
+
+def _engine_metrics(
+    *,
+    cpu_pct: float = 80.0,
+) -> SystemMetrics:
+    """Engine 테스트에서 공통으로 사용하는 시스템 메트릭."""
+
+    return SystemMetrics(
+        cpu_pct=cpu_pct,
+        mem_pct=65.0,
+        connection_count=50,
+    )
+
+
+def _approval_waiting_state() -> AgentRuntimeState:
+    """승인 대기 상태와 스케일링 전 측정 결과를 함께 만든다."""
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state.update(
+        {
+            "load_test_result": _engine_load_result(
+                tps=30.0,
+                latency_p95=1800.0,
+            ),
+            "system_metrics": _engine_metrics(
+                cpu_pct=92.0,
+            ),
+            "bottleneck_report": BottleneckReport(
+                cause="목표 TPS 미달과 CPU 과부하",
+                severity="high",
+                recommendation="컨테이너 수 증가",
+                confidence=0.95,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "목표 TPS 미달 및 CPU 과부하",
+            },
+            "loop_count": 1,
+            "error": None,
+        }
+    )
+
+    return state
+
+
+@pytest.mark.asyncio
+async def test_engine_runs_diagnosis_nodes_in_order():
+    """
+    Engine이 다음 순서로 Node를 실행하는지 확인한다.
+
+    run_load_test_node
+    → collect_metrics_node
+    → llm_reasoning_node
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+    executed: list[str] = []
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("load")
+
+        return {
+            "load_test_result": _engine_load_result(
+                tps=31.0,
+                latency_p95=300.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("metrics")
+        assert current_state["load_test_result"] is not None
+
+        return {
+            "system_metrics": _engine_metrics(
+                cpu_pct=40.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("reasoning")
+        assert current_state["system_metrics"] is not None
+
+        return {
+            "bottleneck_report": BottleneckReport(
+                cause="병목 없음",
+                severity="low",
+                recommendation="현재 구성 유지",
+                confidence=0.97,
+                requires_scaling=False,
+            ),
+            "agent_outcome": "diagnosed",
+            "scaling_required": False,
+            "waiting_for_approval": False,
+            "scaling_plan": None,
+            "loop_count": current_state["loop_count"] + 1,
+            "final_answer": "진단 완료",
+            "error": None,
+        }
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        reasoning_node=fake_reasoning,
+    )
+
+    assert result is state
+    assert executed == [
+        "load",
+        "metrics",
+        "reasoning",
+    ]
+    assert result["agent_outcome"] == "diagnosed"
+    assert result["bottleneck_report"] is not None
+    assert result["loop_count"] == 1
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_stops_when_load_test_fails():
+    """부하 테스트 실패 후 다음 Node가 실행되지 않는지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+    executed: list[str] = []
+
+    async def failed_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("load")
+
+        return {
+            "agent_outcome": "failed",
+            "waiting_for_approval": False,
+            "final_answer": None,
+            "error": "Locust 실행 실패",
+        }
+
+    async def must_not_run(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("unexpected")
+        pytest.fail(
+            "부하 테스트 실패 후 다음 Node가 실행되면 안 됩니다."
+        )
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=failed_load,
+        metrics_node=must_not_run,
+        reasoning_node=must_not_run,
+    )
+
+    assert executed == ["load"]
+    assert result["agent_outcome"] == "failed"
+    assert "Locust 실행 실패" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_engine_waits_for_approval_when_scaling_is_required():
+    """스케일링 필요 시 awaiting_approval로 종료되는지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "load_test_result": _engine_load_result(
+                tps=30.0,
+                latency_p95=1800.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "system_metrics": _engine_metrics(
+                cpu_pct=92.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "bottleneck_report": BottleneckReport(
+                cause="CPU 과부하",
+                severity="high",
+                recommendation="스케일 아웃",
+                confidence=0.95,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "CPU 과부하",
+            },
+            "loop_count": current_state["loop_count"] + 1,
+            "error": None,
+        }
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        reasoning_node=fake_reasoning,
+    )
+
+    assert result["agent_outcome"] == "awaiting_approval"
+    assert result["scaling_required"] is True
+    assert result["waiting_for_approval"] is True
+    assert result["scaling_plan"]["desired_replicas"] == 2
+    assert engine.is_waiting_for_approval(result) is True
+
+
+@pytest.mark.asyncio
+async def test_engine_rejects_scaling_without_running_scaling_node():
+    """사용자 거절 시 스케일링 Node가 실행되지 않는지 확인한다."""
+
+    state = _approval_waiting_state()
+    scaling_called = False
+
+    async def must_not_scale(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        nonlocal scaling_called
+        scaling_called = True
+        pytest.fail(
+            "사용자 거절 후 스케일링이 실행되면 안 됩니다."
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=False,
+        scaling_node=must_not_scale,
+    )
+
+    assert scaling_called is False
+    assert result["scaling_approved"] is False
+    assert result["waiting_for_approval"] is False
+    assert result["agent_outcome"] == "diagnosed"
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_scales_and_revalidates_successfully():
+    """
+    승인 후 스케일링, 재부하 테스트, 재메트릭 수집,
+    Solar 재검증까지 성공하는지 확인한다.
+    """
+
+    state = _approval_waiting_state()
+    executed: list[str] = []
+
+    async def fake_scaling(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("scaling")
+        assert current_state["scaling_approved"] is True
+
+        return {
+            "scaling_result": ScalingResult(
+                before_replicas=1,
+                after_replicas=2,
+                success=True,
+            ),
+            "scaling_count": (
+                current_state["scaling_count"] + 1
+            ),
+            "agent_outcome": "scaled",
+            "waiting_for_approval": False,
+            "error": None,
+        }
+
+    async def fake_revalidation_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("revalidation_load")
+
+        return {
+            "load_test_result": _engine_load_result(
+                tps=55.0,
+                latency_p95=600.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_revalidation_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("revalidation_metrics")
+
+        return {
+            "system_metrics": _engine_metrics(
+                cpu_pct=55.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_revalidation(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        executed.append("revalidation_llm")
+        assert system_prompt
+        assert user_prompt
+
+        return json.dumps(
+            {
+                "summary": "스케일링 후 성능이 개선되었습니다.",
+                "performance_improved": True,
+                "additional_action_required": False,
+                "recommended_action": None,
+            },
+            ensure_ascii=False,
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=fake_scaling,
+        load_test_node=fake_revalidation_load,
+        metrics_node=fake_revalidation_metrics,
+        revalidation_caller=fake_revalidation,
+    )
+
+    assert executed == [
+        "scaling",
+        "revalidation_load",
+        "revalidation_metrics",
+        "revalidation_llm",
+    ]
+    assert result["agent_outcome"] == "scaled"
+    assert result["scaling_result"].success is True
+    assert result["scaling_result"].after_replicas == 2
+    assert result["scaling_count"] == 1
+    assert result["waiting_for_approval"] is False
+    assert result["error"] is None
+    assert "재검증 완료" in result["final_answer"]
+
+
+@pytest.mark.asyncio
+async def test_engine_runs_next_reasoning_loop_when_revalidation_fails():
+    """
+    재검증 결과가 충분하지 않으면 reasoning Node를 다시 실행하는지 확인한다.
+    """
+
+    state = _approval_waiting_state()
+    reasoning_called = 0
+
+    async def fake_scaling(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "scaling_result": ScalingResult(
+                before_replicas=1,
+                after_replicas=2,
+                success=True,
+            ),
+            "scaling_count": (
+                current_state["scaling_count"] + 1
+            ),
+            "agent_outcome": "scaled",
+            "waiting_for_approval": False,
+            "error": None,
+        }
+
+    async def fake_revalidation_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "load_test_result": _engine_load_result(
+                tps=35.0,
+                latency_p95=1400.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_revalidation_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "system_metrics": _engine_metrics(
+                cpu_pct=80.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        nonlocal reasoning_called
+        reasoning_called += 1
+
+        return {
+            "bottleneck_report": BottleneckReport(
+                cause="병목 지속",
+                severity="high",
+                recommendation="추가 스케일링",
+                confidence=0.9,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 2,
+                "desired_replicas": 3,
+                "reason": "성능 개선 부족",
+            },
+            "loop_count": (
+                current_state["loop_count"] + 1
+            ),
+            "final_answer": "추가 승인이 필요합니다.",
+            "error": None,
+        }
+
+    async def fake_revalidation(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "summary": "성능 개선이 충분하지 않습니다.",
+                "performance_improved": False,
+                "additional_action_required": True,
+                "recommended_action": "replica 추가 증가",
+            },
+            ensure_ascii=False,
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=fake_scaling,
+        load_test_node=fake_revalidation_load,
+        metrics_node=fake_revalidation_metrics,
+        reasoning_node=fake_reasoning,
+        revalidation_caller=fake_revalidation,
+    )
+
+    assert reasoning_called == 1
+    assert result["agent_outcome"] == "awaiting_approval"
+    assert result["waiting_for_approval"] is True
+    assert result["scaling_plan"]["desired_replicas"] == 3
+    assert result["loop_count"] == 2
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_max_loop_guard_blocks_additional_diagnosis():
+    """MAX_LOOP 도달 후 추가 진단 Node 실행을 차단하는지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=10,
+        duration=5,
+    )
+
+    max_loop = getattr(
+        engine,
+        "MAX_LOOP_COUNT",
+        getattr(engine, "MAX_LOOP", None),
+    )
+    assert max_loop is not None, (
+        "engine.py에 MAX_LOOP_COUNT 또는 MAX_LOOP가 필요합니다."
+    )
+
+    state["loop_count"] = max_loop
+
+    async def must_not_run(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        pytest.fail(
+            "MAX_LOOP 도달 후 Node가 실행되면 안 됩니다."
+        )
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=must_not_run,
+        metrics_node=must_not_run,
+        reasoning_node=must_not_run,
+    )
+
+    assert result["agent_outcome"] == "failed"
+    assert str(max_loop) in (result["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_engine_timeout_returns_failed_state(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Engine 제한 시간 초과가 failed 상태로 변환되는지 확인한다."""
+
+    monkeypatch.setattr(
+        engine,
+        "ENGINE_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    async def slow_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        await asyncio.sleep(0.1)
+        return {}
+
+    result = await engine.start_agent(
+        target_tps=10,
+        duration=5,
+        load_test_node=slow_load,
+    )
+
+    assert result["agent_outcome"] == "failed"
+    assert "제한 시간" in (result["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_engine_scaling_exception_becomes_failed_state():
+    """스케일링 Node 예외가 failed 상태로 변환되는지 확인한다."""
+
+    state = _approval_waiting_state()
+
+    async def failed_scaling(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        raise RuntimeError("Docker 스케일링 오류")
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=failed_scaling,
+    )
+
+    assert result["agent_outcome"] == "failed"
+    assert result["waiting_for_approval"] is False
+    assert "Docker 스케일링 오류" in (
+        result["error"] or ""
+    )
+
+
+# engine.py 통합 테스트
+@pytest.mark.asyncio
+async def test_engine_integration_diagnosis_without_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Engine이 실제 Node들을 순서대로 실행하고,
+    스케일링이 불필요하면 diagnosed로 종료되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+
+    def fake_load_test(
+        *,
+        target_tps: int,
+        duration: int,
+    ) -> LoadTestResult:
+        assert target_tps == 30
+        assert duration == 10
+
+        return LoadTestResult(
+            tps=32.0,
+            latency_p95=300.0,
+            latency_avg=150.0,
+            error_rate=0.0,
+            duration=duration,
+            total_requests=320,
+        )
+
+    async def fake_metrics() -> SystemMetrics:
+        return SystemMetrics(
+            cpu_pct=42.0,
+            mem_pct=51.0,
+            connection_count=8,
+        )
+
+    async def fake_llm(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        assert "InfraGuard Agent" in system_prompt
+        assert "target-server" in user_prompt
+
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "목표 TPS를 달성했고 병목이 없습니다.",
+            "severity": "low",
+            "recommendation": "현재 구성을 유지합니다.",
+            "confidence": 0.97,
+            "requires_scaling": false
+          },
+          "agent_outcome": "diagnosed",
+          "scaling_plan": null
+        }
+        """
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def load_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await run_load_test_node(
+            current_state,
+            load_test_runner=fake_load_test,
+        )
+
+    async def metrics_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await collect_metrics_node(
+            current_state,
+            metrics_collector=fake_metrics,
+        )
+
+    async def reasoning_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await llm_reasoning_node(
+            current_state,
+            llm_caller=fake_llm,
+        )
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=load_node,
+        metrics_node=metrics_node,
+        reasoning_node=reasoning_node,
+    )
+
+    assert result is state
+    assert result["load_test_result"] is not None
+    assert result["system_metrics"] is not None
+    assert result["bottleneck_report"] is not None
+    assert result["agent_outcome"] == "diagnosed"
+    assert result["scaling_required"] is False
+    assert result["waiting_for_approval"] is False
+    assert result["scaling_plan"] is None
+    assert result["loop_count"] == 1
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_integration_scaling_and_revalidation_success(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    진단 → 승인 대기 → 승인 → 스케일링 → 재검증 성공까지
+    전체 흐름이 정상 동작하는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    load_calls = 0
+    metric_calls = 0
+
+    def fake_load_test(
+        *,
+        target_tps: int,
+        duration: int,
+    ) -> LoadTestResult:
+        nonlocal load_calls
+        load_calls += 1
+
+        if load_calls == 1:
+            return LoadTestResult(
+                tps=28.0,
+                latency_p95=1900.0,
+                latency_avg=950.0,
+                error_rate=0.09,
+                duration=duration,
+                total_requests=840,
+            )
+
+        return LoadTestResult(
+            tps=55.0,
+            latency_p95=600.0,
+            latency_avg=300.0,
+            error_rate=0.01,
+            duration=duration,
+            total_requests=1650,
+        )
+
+    async def fake_metrics() -> SystemMetrics:
+        nonlocal metric_calls
+        metric_calls += 1
+
+        if metric_calls == 1:
+            return SystemMetrics(
+                cpu_pct=93.0,
+                mem_pct=76.0,
+                connection_count=120,
+            )
+
+        return SystemMetrics(
+            cpu_pct=55.0,
+            mem_pct=60.0,
+            connection_count=80,
+        )
+
+    async def fake_reasoning_llm(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "목표 TPS 미달과 CPU 과부하가 확인되었습니다.",
+            "severity": "high",
+            "recommendation": "컨테이너 수를 늘립니다.",
+            "confidence": 0.95,
+            "requires_scaling": true
+          },
+          "agent_outcome": "awaiting_approval",
+          "scaling_plan": {
+            "service_name": "target-server",
+            "current_replicas": 1,
+            "desired_replicas": 2,
+            "reason": "목표 TPS 미달 및 CPU 과부하"
+          }
+        }
+        """
+
+    async def fake_scaler(
+        target_replicas: int,
+    ) -> ScalingResult:
+        assert target_replicas == 2
+
+        return ScalingResult(
+            before_replicas=1,
+            after_replicas=2,
+            success=True,
+        )
+
+    async def fake_revalidation_llm(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "summary": "TPS와 응답 지연이 개선되었습니다.",
+                "performance_improved": True,
+                "additional_action_required": False,
+                "recommended_action": None,
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def load_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await run_load_test_node(
+            current_state,
+            load_test_runner=fake_load_test,
+        )
+
+    async def metrics_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await collect_metrics_node(
+            current_state,
+            metrics_collector=fake_metrics,
+        )
+
+    async def reasoning_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await llm_reasoning_node(
+            current_state,
+            llm_caller=fake_reasoning_llm,
+        )
+
+    async def scaling_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await execute_scaling_node(
+            current_state,
+            scaler=fake_scaler,
+        )
+
+    diagnosed = await engine.run_diagnosis(
+        state,
+        load_test_node=load_node,
+        metrics_node=metrics_node,
+        reasoning_node=reasoning_node,
+    )
+
+    assert diagnosed["agent_outcome"] == "awaiting_approval"
+    assert diagnosed["waiting_for_approval"] is True
+    assert diagnosed["scaling_plan"]["desired_replicas"] == 2
+
+    result = await engine.resume_after_approval(
+        diagnosed,
+        approved=True,
+        scaling_node=scaling_node,
+        load_test_node=load_node,
+        metrics_node=metrics_node,
+        reasoning_node=reasoning_node,
+        revalidation_caller=fake_revalidation_llm,
+    )
+
+    assert load_calls == 2
+    assert metric_calls == 2
+    assert result["agent_outcome"] == "scaled"
+    assert result["scaling_result"] is not None
+    assert result["scaling_result"].success is True
+    assert result["scaling_result"].after_replicas == 2
+    assert result["scaling_count"] == 1
+    assert result["waiting_for_approval"] is False
+    assert result["scaling_required"] is False
+    assert result["scaling_plan"] is None
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_integration_revalidation_runs_next_loop(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    스케일링 후 성능 개선이 부족하면 실제 reasoning Node가 다시 실행되어
+    다음 승인 대기 상태가 되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state.update(
+        {
+            "load_test_result": LoadTestResult(
+                tps=28.0,
+                latency_p95=1900.0,
+                latency_avg=950.0,
+                error_rate=0.09,
+                duration=30,
+                total_requests=840,
+            ),
+            "system_metrics": SystemMetrics(
+                cpu_pct=93.0,
+                mem_pct=76.0,
+                connection_count=120,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "CPU 과부하",
+            },
+            "loop_count": 1,
+            "error": None,
+        }
+    )
+
+    async def fake_scaler(
+        target_replicas: int,
+    ) -> ScalingResult:
+        return ScalingResult(
+            before_replicas=1,
+            after_replicas=target_replicas,
+            success=True,
+        )
+
+    def fake_load_test(
+        *,
+        target_tps: int,
+        duration: int,
+    ) -> LoadTestResult:
+        return LoadTestResult(
+            tps=35.0,
+            latency_p95=1400.0,
+            latency_avg=700.0,
+            error_rate=0.05,
+            duration=duration,
+            total_requests=1050,
+        )
+
+    async def fake_metrics() -> SystemMetrics:
+        return SystemMetrics(
+            cpu_pct=80.0,
+            mem_pct=70.0,
+            connection_count=100,
+        )
+
+    async def fake_next_reasoning_llm(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "스케일링 후에도 병목이 지속됩니다.",
+            "severity": "high",
+            "recommendation": "replica를 한 번 더 증가합니다.",
+            "confidence": 0.9,
+            "requires_scaling": true
+          },
+          "agent_outcome": "awaiting_approval",
+          "scaling_plan": {
+            "service_name": "target-server",
+            "current_replicas": 2,
+            "desired_replicas": 3,
+            "reason": "성능 개선 부족"
+          }
+        }
+        """
+
+    async def fake_revalidation_llm(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "summary": "성능 개선이 충분하지 않습니다.",
+                "performance_improved": False,
+                "additional_action_required": True,
+                "recommended_action": "replica 추가 증가",
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 2,
+    )
+
+    async def scaling_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await execute_scaling_node(
+            current_state,
+            scaler=fake_scaler,
+        )
+
+    async def load_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await run_load_test_node(
+            current_state,
+            load_test_runner=fake_load_test,
+        )
+
+    async def metrics_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await collect_metrics_node(
+            current_state,
+            metrics_collector=fake_metrics,
+        )
+
+    async def reasoning_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await llm_reasoning_node(
+            current_state,
+            llm_caller=fake_next_reasoning_llm,
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=scaling_node,
+        load_test_node=load_node,
+        metrics_node=metrics_node,
+        reasoning_node=reasoning_node,
+        revalidation_caller=fake_revalidation_llm,
+    )
+
+    assert result["agent_outcome"] == "awaiting_approval"
+    assert result["waiting_for_approval"] is True
+    assert result["scaling_required"] is True
+    assert result["scaling_plan"]["current_replicas"] == 2
+    assert result["scaling_plan"]["desired_replicas"] == 3
+    assert result["loop_count"] == 2
+    assert result["scaling_count"] == 1
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_integration_stops_after_node_failure():
+    """
+    실제 run_load_test_node가 실패하면 Engine이 이후 Node를 실행하지 않는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+
+    def failing_load_test(
+        *,
+        target_tps: int,
+        duration: int,
+    ) -> LoadTestResult:
+        raise RuntimeError("통합 테스트용 Locust 실패")
+
+    async def load_node(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return await run_load_test_node(
+            current_state,
+            load_test_runner=failing_load_test,
+        )
+
+    metrics_called = False
+    reasoning_called = False
+
+    async def must_not_run_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        nonlocal metrics_called
+        metrics_called = True
+        pytest.fail(
+            "부하 테스트 실패 후 metrics Node가 실행되면 안 됩니다."
+        )
+
+    async def must_not_run_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        nonlocal reasoning_called
+        reasoning_called = True
+        pytest.fail(
+            "부하 테스트 실패 후 reasoning Node가 실행되면 안 됩니다."
+        )
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=load_node,
+        metrics_node=must_not_run_metrics,
+        reasoning_node=must_not_run_reasoning,
+    )
+
+    assert metrics_called is False
+    assert reasoning_called is False
+    assert result["agent_outcome"] == "failed"
+    assert "통합 테스트용 Locust 실패" in result["error"]
