@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=2">
 </head>
 
 <body>
@@ -80,6 +80,17 @@
 
 
         <div class="control-panel">
+
+            <div class="input-group">
+                <label for="target-tps-input">목표 TPS</label>
+                <input type="number" id="target-tps-input" value="30" min="1">
+            </div>
+
+            <div class="input-group">
+                <label for="duration-input">테스트 시간(초)</label>
+                <input type="number" id="duration-input" value="10" min="1">
+            </div>
+
             <button id="start-btn">
                 자율 진단 및 부하 테스트 시작
             </button>
@@ -123,7 +134,7 @@
 
     </div>
 
-    <script src="main.js"></script>
+    <script src="main.js?v=2"></script>
 
 </body>
 

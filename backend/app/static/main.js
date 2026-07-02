@@ -5,10 +5,7 @@ const modalMessage = document.getElementById('modal-message');
 const approveBtn = document.getElementById('approve-btn');
 const rejectBtn = document.getElementById('reject-btn');
 
-
-
 const statusLabel = document.getElementById("agent-status");
-
 
 const steps = [
     "step-load",
@@ -23,12 +20,8 @@ const steps = [
 let currentTaskId = null;
 let eventSource = null;
 
-
-
 function appendLog(message, type = 'info') {
-
     let icon = "ℹ";
-
     switch (type) {
         case "system":
             icon = "⚙";
@@ -45,78 +38,106 @@ function appendLog(message, type = 'info') {
     }
 
     const logEntry = document.createElement('div');
-
     logEntry.className = `log-entry ${type}`;
-
-    logEntry.innerText =
-        `[${new Date().toLocaleTimeString()}] ${icon} ${message}`;
-
+    logEntry.innerText = `[${new Date().toLocaleTimeString()}] ${icon} ${message}`;
     logWindow.appendChild(logEntry);
-
     logWindow.scrollTop = logWindow.scrollHeight;
 }
 
-
-
 function updateStatus(text, cls) {
-
     statusLabel.className = `status ${cls}`;
     statusLabel.innerHTML = text;
-
 }
 
-
 function activateStep(id) {
-
     document.getElementById(id).classList.add("active");
-
 }
 
 function completeStep(id) {
-
     const step = document.getElementById(id);
-
     step.classList.remove("active");
-
     step.classList.add("done");
-
 }
 
 function resetProgress() {
-
     steps.forEach(id => {
-
         const step = document.getElementById(id);
-
         step.classList.remove("active");
         step.classList.remove("done");
-
     });
-
 }
 
+async function fetchReport(taskId) {
+    try {
+        const response = await fetch(`/api/v1/agent/report/${taskId}`);
+        if (!response.ok) {
+            appendLog("리포트 조회 실패", "error");
+            return;
+        }
 
+        const report = await response.json();
+
+        if (report.measurement) {
+            appendLog(`📊 측정값 — TPS: ${report.measurement.tps.toFixed(1)} / 에러율: ${(report.measurement.error_rate * 100).toFixed(1)}%`, 'info');
+            appendLog(`📊 지연시간 — P95: ${report.measurement.latency_p95.toFixed(0)}ms / 평균: ${report.measurement.latency_avg.toFixed(0)}ms`, 'info');
+            appendLog(`📊 요청 통계 — 총 ${report.measurement.total_requests}건 요청 (${report.measurement.duration}초간)`, 'info');
+        }
+
+        if (report.action) {
+            const actionType = report.action.success ? 'success' : 'error';
+            const actionMsg = report.action.success
+                ? `🔧 조치 — Scale-out 완료 (${report.action.before_replicas} → ${report.action.after_replicas})`
+                : `🔧 조치 실패 — ${report.action.error_message}`;
+            appendLog(actionMsg, actionType);
+        } else {
+            appendLog("🔧 조치 — 아직 스케일링이 실행되지 않았습니다.", 'info');
+        }
+    } catch (error) {
+        appendLog("리포트 조회 중 오류가 발생했습니다.", "error");
+    }
+}
 
 startBtn.addEventListener('click', () => {
-
     logWindow.innerHTML = "";
-
     resetProgress();
-
     appendLog('자율 진단 시스템 가동 요청 중...', 'system');
-
     updateStatus("🔵 RUNNING", "running");
-
     activateStep("step-load");
-
     startBtn.disabled = true;
 
-    eventSource = new EventSource('/api/v1/agent/start');
+    const tpsInput = document.getElementById('target-tps-input');
+    const durationInput = document.getElementById('duration-input');
+
+    if (!tpsInput || !durationInput) {
+        console.warn('입력 필드를 찾지 못했습니다 (target-tps-input / duration-input). index.html의 id를 확인하세요.');
+    }
+
+    const targetTps = tpsInput ? (parseInt(tpsInput.value, 10) || 30) : 30;
+    const duration = durationInput ? (parseInt(durationInput.value, 10) || 10) : 10;
+
+    console.log(`[진단 시작] target_tps=${targetTps}, duration=${duration}`);
+
+    currentTaskId = null;
+    if (eventSource) {
+        eventSource.close();
+    }
+
+    eventSource = new EventSource(
+        `/api/v1/agent/start?target_tps=${encodeURIComponent(targetTps)}&duration=${encodeURIComponent(duration)}`
+    );
 
     eventSource.onmessage = function (event) {
         const data = JSON.parse(event.data);
 
+        if (data.task_id && currentTaskId && data.task_id !== currentTaskId) {
+            console.warn('다른 task_id의 이벤트를 무시했습니다:', data.task_id, '(현재 추적 중:', currentTaskId + ')');
+            return;
+        }
+
         if (data.status === 'running') {
+            if (!currentTaskId && data.task_id) {
+                currentTaskId = data.task_id;
+            }
             appendLog(data.message, 'info');
             completeStep("step-load");
             activateStep("step-metric");
@@ -128,7 +149,6 @@ startBtn.addEventListener('click', () => {
             activateStep("step-ai");
         }
         
-        // 에러 상태 분기 추가
         else if (data.status === 'error') {
             appendLog(data.message, 'error');
             updateStatus("🔴 ERROR", "error");
@@ -146,10 +166,8 @@ startBtn.addEventListener('click', () => {
             activateStep("step-approval");
             updateStatus("🟠 WAITING APPROVAL", "waiting");
             approvalModal.classList.remove("hidden");
-            // 승인 대기 중에도 서버가 결과를 이어서 보내줘야 하므로 연결을 끊지 않는다.
         }
 
-        // scale_service 호출 중 백엔드가 보내는 진행 상태
         else if (data.status === 'scaling') {
             appendLog(data.message, 'info');
             completeStep("step-approval");
@@ -157,7 +175,6 @@ startBtn.addEventListener('click', () => {
             updateStatus("🟣 SCALING", "scaling");
         }
 
-        // scale_service 결과 success=True → 최종 완료
         else if (data.status === 'done') {
             appendLog(data.message, 'success');
             completeStep("step-scale");
@@ -166,121 +183,92 @@ startBtn.addEventListener('click', () => {
             updateStatus("🟢 COMPLETED", "completed");
             startBtn.disabled = false;
             eventSource.close();
+            fetchReport(data.task_id);
         }
 
-        // agent.py가 보내는 모든 실패 케이스(인프라 다운, 부하테스트 실패,
-        // 승인 거절, scale_service 실패)는 status: 'failed'로 통일되어 온다.
         else if (data.status === 'failed') {
             appendLog(data.message, 'error');
             updateStatus("🔴 ERROR", "error");
             approvalModal.classList.add("hidden");
             startBtn.disabled = false;
             eventSource.close();
+            if (data.task_id) {
+                fetchReport(data.task_id);
+            }
         }
     };
 
     eventSource.onerror = function () {
-        // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
-        if (eventSource.readyState !== EventSource.CLOSED) {
+        // [수정 가드레일]: 부하 테스트 후 단계 전환 시 브라우저가 자동 재연결(CONNECTING)할 때는 튕기지 않고 기다립니다.
+        if (eventSource.readyState === EventSource.CONNECTING) {
+            console.log("단계 전환 또는 재연결 시도 중... 대기합니다.");
+            return;
+        }
+        if (eventSource.readyState === EventSource.CLOSED) {
             appendLog("[에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! docker compose up -d를 확인하세요.", "error");
             updateStatus("🔴 ERROR", "error");
-        } else {
-            appendLog("스트리밍 연결 종료.", "system");
+            eventSource.close();
+            startBtn.disabled = false;
         }
-        eventSource.close();
-        startBtn.disabled = false;
     };
 });
 
-
-
+// [수정 구역]: 승인 버튼 클릭 시 일단 모달창부터 즉시 숨기고 통신 시작
 approveBtn.addEventListener('click', async () => {
-
     if (!currentTaskId) return;
 
+    // 1. 화면에서 모달창을 0.1초 만에 먼저 숨기기 (Class 방식 + display 명시적 처리로 이중 잠금)
+    approvalModal.classList.add('hidden');
+    approvalModal.style.display = 'none';
+    appendLog("스케일링 제안을 승인했습니다. 조치를 시작합니다.", "system");
+
     try {
-
         const response = await fetch('/api/v1/agent/approve', {
-
             method: 'POST',
-
             headers: {
                 'Content-Type': 'application/json'
             },
-
             body: JSON.stringify({
-
                 task_id: currentTaskId,
                 approved: true
-
             })
-
         });
 
-        const result = await response.json();
-
-        appendLog(result.message, 'success');
-
-        approvalModal.classList.add('hidden');
-
-        // 이후 진행 상황(스케일링 → 완료/실패)은 이미 열려 있는 SSE 스트림의
-        // 'scaling' / 'done' / 'failed' 이벤트에서 실시간으로 갱신된다.
-        // (scale_service.py 실제 실행 결과를 그대로 반영)
-
+        if (response.ok) {
+            const result = await response.json();
+            if (result && result.message) {
+                appendLog(result.message, 'success');
+            }
+        }
     }
-
     catch (error) {
-
-        appendLog("승인 요청 실패", "error");
-
-        updateStatus("🔴 ERROR", "error");
-
-        startBtn.disabled = false;
-
+        console.error("승인 요청 통신 실패:", error);
+        appendLog("승인 요청 전달 중 네트워크 지연이 발생했으나 에이전트 상태를 이어서 관측합니다.", "warning");
     }
-
 });
 
-
-
+// [수정 구역]: 거절 버튼 클릭 시에도 즉시 모달창부터 숨기기
 rejectBtn.addEventListener('click', async () => {
-
     if (!currentTaskId) return;
 
+    // 1. 모달창 즉시 숨기기
+    approvalModal.classList.add("hidden");
+    approvalModal.style.display = 'none';
+    appendLog("스케일링 제안을 거절했습니다.", "warning");
+
     try {
-
         await fetch('/api/v1/agent/approve', {
-
             method: 'POST',
-
             headers: {
                 'Content-Type': 'application/json'
             },
-
             body: JSON.stringify({
-
                 task_id: currentTaskId,
                 approved: false
-
             })
-
         });
-
-        approvalModal.classList.add("hidden");
-
-        // agent.py가 승인 거절을 감지하면 status: 'failed' 이벤트를 스트리밍으로
-        // 보내주므로, 최종 로그/상태 갱신은 위 eventSource.onmessage에서 처리한다.
-
     }
-
     catch (error) {
-
-        appendLog("거절 요청 실패", "error");
-
-        updateStatus("🔴 ERROR", "error");
-
-        startBtn.disabled = false;
-
+        console.error("거절 요청 통신 실패:", error);
     }
-
 });
