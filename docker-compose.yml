@@ -5,7 +5,7 @@ services:
     # container_name 제거 — --scale 동작을 위해 필수
     # container_name이 있으면 Docker가 복제를 거부함
     ports:
-      - "8080-8089:8080"
+      - "8080:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 5s
