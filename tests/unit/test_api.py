@@ -44,7 +44,7 @@ def test_approve_endpoint_success():
     
     # agent.py의 전역 객체 task_manager의 approve_task 메서드 모킹
     with patch("app.api.v1.agent.task_manager.approve_task") as mock_approve:
-        mock_approve.return_value = True
+        mock_approve.return_value = "success"
         
         response = client.post("/api/v1/agent/approve", json=payload)
         assert response.status_code in [200, 404]
