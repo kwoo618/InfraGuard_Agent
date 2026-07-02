@@ -13,6 +13,11 @@ from app.tools.scale_service import scale_service
 router = APIRouter()
 executor = ThreadPoolExecutor(max_workers=3)
 
+# state.py의 AgentRuntimeState 스펙을 건드리지 않기 위해,
+# 재측정(re-measurement) 결과는 agent.py 자체 저장소에 따로 보관한다.
+# key: task_id, value: LoadTestResult (스케일링 후 재측정 결과)
+remeasurement_results: dict[str, "LoadTestResult"] = {}
+
 
 # =================================================================
 # 🔒 비동기 자물쇠(Event)와 상태를 안전하게 관리하는 매니저
@@ -43,7 +48,10 @@ class AgentTaskManager:
 
         return approved
 
-    def approve_task(self, task_id: str, approved: bool) -> bool:
+    def approve_task(self, task_id: str, approved: bool) -> str:
+        """
+        반환값: "success" | "not_found" | "already_done"
+        """
         print(f"[approve] task={task_id}, approved={approved}")
 
         future = self.futures.get(task_id)
@@ -51,11 +59,11 @@ class AgentTaskManager:
 
         if future is None or state is None:
             print("[approve] task not found")
-            return False
+            return "not_found"
 
         if future.done():
             print("[approve] already completed")
-            return False
+            return "already_done"
 
         state["scaling_approved"] = approved
 
@@ -63,7 +71,7 @@ class AgentTaskManager:
 
         print("[approve] future completed")
 
-        return True
+        return "success"
         
 
 # 전역 매니저 인스턴스
@@ -82,9 +90,14 @@ async def approve_task(req: ApprovalRequest):
     """
     주황색 모달창에서 [승인] / [거절] 버튼을 누르면 호출되는 API입니다.
     """
-    success = task_manager.approve_task(req.task_id, req.approved)
-    if success:
+    result = task_manager.approve_task(req.task_id, req.approved)
+
+    if result == "success":
         return {"status": "success", "message": f"Task {req.task_id} 승인 상태 반영 완료"}
+
+    if result == "already_done":
+        return {"status": "error", "message": "이미 처리된 작업입니다. (중복 클릭)"}
+
     return {"status": "error", "message": "해당 작업 ID를 찾을 수 없습니다."}
 
 
@@ -104,17 +117,30 @@ async def get_report(task_id: str):
         raise HTTPException(status_code=404, detail="해당 task_id를 찾을 수 없습니다.")
 
     load_test_result = state.get("load_test_result")
+    load_test_result_after = remeasurement_results.get(task_id)   # 재측정 결과 (없으면 아직 재측정 전/실패)
     scaling_result = state.get("scaling_result")
 
-    measurement = None
-    if load_test_result is not None:
-        measurement = {
-            "tps": load_test_result.tps,
-            "error_rate": load_test_result.error_rate,
-            "latency_p95": load_test_result.latency_p95,   # ms
-            "latency_avg": load_test_result.latency_avg,   # ms
-            "total_requests": load_test_result.total_requests,
-            "duration": load_test_result.duration,          # 초
+    def _serialize_measurement(r):
+        if r is None:
+            return None
+        return {
+            "tps": r.tps,
+            "error_rate": r.error_rate,
+            "latency_p95": r.latency_p95,   # ms
+            "latency_avg": r.latency_avg,   # ms
+            "total_requests": r.total_requests,
+            "duration": r.duration,          # 초
+        }
+
+    measurement = _serialize_measurement(load_test_result)
+    measurement_after = _serialize_measurement(load_test_result_after)
+
+    improvement = None
+    if measurement is not None and measurement_after is not None:
+        improvement = {
+            "tps_delta": measurement_after["tps"] - measurement["tps"],
+            "latency_p95_delta": measurement_after["latency_p95"] - measurement["latency_p95"],   # 음수면 개선
+            "error_rate_delta": measurement_after["error_rate"] - measurement["error_rate"],
         }
 
     action = None
@@ -130,7 +156,9 @@ async def get_report(task_id: str):
         "task_id": task_id,
         "outcome": state.get("agent_outcome"),           # diagnosed / awaiting_approval / scaled / failed 등
         "waiting_for_approval": state.get("waiting_for_approval", False),
-        "measurement": measurement,                       # 부하 테스트 실측값 (없으면 None = 아직 측정 전)
+        "measurement": measurement,                       # 스케일링 전 부하 테스트 실측값
+        "measurement_after": measurement_after,            # 스케일링 후 재측정 결과 (없으면 None)
+        "improvement": improvement,                         # 전/후 비교 (없으면 None = 재측정 안 됨)
         "action": action,                                  # 실제 스케일링 조치 결과 (없으면 None = 아직 조치 전)
         "error": state.get("error"),
     }
@@ -155,7 +183,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     인프라 자율 진단 및 조치 프로세스를 실시간으로 스트리밍하는 핵심 로직.
     """
     
-    # 1. AgentRuntimeState 데이터 초기화
+    # 1. AgentState 데이터 초기화
     try:
         state = create_initial_state(target_tps=target_tps, duration=duration)
     except ValueError as e:
@@ -167,7 +195,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     # =================================================================
     # [1단계: 인프라 헬스체크]
     # =================================================================
-    yield f"data: {{\"status\": \"running\", \"task_id\": \"{task_id}\", \"message\": \"[1/6] 로컬 인프라(Prometheus) 생사 확인 중...\"}}\n\n"
+    yield f"data: {{\"status\": \"running\", \"task_id\": \"{task_id}\", \"message\": \"🔍 인프라 연결 확인 중...\"}}\n\n"
     await asyncio.sleep(0.5)
 
     async with httpx.AsyncClient() as client:
@@ -180,14 +208,14 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
             yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ [에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요.\"}}\n\n"
             return
 
-    yield f"data: {{\"status\": \"running\", \"task_id\": \"{task_id}\", \"message\": \"🟢 로컬 도커 인프라 연결 확인 완료!\"}}\n\n"
+    yield f"data: {{\"status\": \"running\", \"task_id\": \"{task_id}\", \"message\": \"✅ 인프라 연결 확인\"}}\n\n"
     await asyncio.sleep(0.5)
 
 
     # =================================================================
     # [2단계: 부하 테스트 실행] 
     # =================================================================
-    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"[2/6] target-server 대상 부하 테스트(Locust) 가동 중... ({duration}초 대기)\"}}\n\n"
+    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"⚡ 부하 테스트 진행 중... ({duration}초)\"}}\n\n"
     
     try:
         loop = asyncio.get_running_loop()
@@ -201,7 +229,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
         state["load_test_result"] = load_test_result
         state["agent_outcome"] = "diagnosed"
         
-        yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"📊 부하 테스트 완료! (실측 TPS: {load_test_result.tps:.1f} / 에러율: {load_test_result.error_rate * 100:.1f}%)\"}}\n\n"
+        yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"✅ 부하 테스트 완료  TPS {load_test_result.tps:.1f} / 에러율 {load_test_result.error_rate * 100:.1f}%\"}}\n\n"
         await asyncio.sleep(1.0)
 
     except LoadTestError as e:
@@ -228,10 +256,13 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     # =================================================================
     # [3단계 ~ 4단계: 모니터링 및 AI 분석 목업]
     # =================================================================
-    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"[3/6] Prometheus에서 실시간 자원 메트릭 수집 중...\"}}\n\n"
-    await asyncio.sleep(1.5)
+    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"📊 메트릭 수집 중...\"}}\n\n"
+    await asyncio.sleep(1.0)
 
-    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"[4/6] AI 에이전트가 병목 구간 추론 및 가드레일 조건 검증 중...\"}}\n\n"
+    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"✅ 메트릭 수집 완료\"}}\n\n"
+    await asyncio.sleep(0.3)
+
+    yield f"data: {{\"status\": \"analyzing\", \"task_id\": \"{task_id}\", \"message\": \"🧠 AI 분석 중...\"}}\n\n"
     await asyncio.sleep(1.5)
 
 
@@ -241,7 +272,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     state["waiting_for_approval"] = True
     state["agent_outcome"] = "awaiting_approval"
     
-    yield f"data: {{\"status\": \"need_approval\", \"task_id\": \"{task_id}\", \"message\": \"⚠️ [가드레일 제한] /heavy 엔드포인트 세마포어 임계치 초과 발생! 대시보드에서 승인이 필요합니다.\"}}\n\n"
+    yield f"data: {{\"status\": \"need_approval\", \"task_id\": \"{task_id}\", \"message\": \"⚠️ 병목 감지 — 서버 증설이 필요합니다. 승인해주세요.\"}}\n\n"
     
     # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
     approved = await task_manager.wait_for_approval(task_id)
@@ -249,7 +280,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
     if not approved:
         state["waiting_for_approval"] = False
         state["agent_outcome"] = "failed"
-        yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ 사용자가 스케일아웃 조치를 거절했습니다. 프로세스를 중단합니다.\"}}\n\n"
+        yield f"data: {{\"status\": \"failed\", \"task_id\": \"{task_id}\", \"message\": \"❌ 서버 증설이 거부되었습니다.\"}}\n\n"
         return
 
 
@@ -262,7 +293,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
         f"data: {{"
         f"\"status\":\"scaling\","
         f"\"task_id\":\"{task_id}\","
-        f"\"message\":\"[5/6] 승인 확인됨. Docker Scale-out 실행 중...\""
+        f"\"message\":\"🚀 서버 증설 중...\""
         f"}}\n\n"
     )
 
@@ -312,8 +343,64 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
 
     yield (
         f"data: {{"
+        f"\"status\":\"scaling\","
+        f"\"task_id\":\"{task_id}\","
+        f"\"message\":\"✅ 서버 증설 완료  {result.before_replicas}대 → {result.after_replicas}대\""
+        f"}}\n\n"
+    )
+
+    # =================================================================
+    # [재측정] 스케일링 후 실제로 성능이 개선됐는지 동일 조건으로 재검증
+    # =================================================================
+    yield (
+        f"data: {{"
+        f"\"status\":\"remeasuring\","
+        f"\"task_id\":\"{task_id}\","
+        f"\"message\":\"🔁 재측정 중...\""
+        f"}}\n\n"
+    )
+
+    load_test_result_after = None
+    try:
+        load_test_result_after = await loop.run_in_executor(
+            executor,
+            run_load_test,
+            target_tps,
+            duration,
+        )
+        remeasurement_results[task_id] = load_test_result_after
+
+    except LoadTestError as e:
+        # 재측정 실패는 스케일링 자체의 성공 여부에 영향을 주지 않는다. 전/후 비교만 못 할 뿐.
+        yield (
+            f"data: {{"
+            f"\"status\":\"scaling\","
+            f"\"task_id\":\"{task_id}\","
+            f"\"message\":\"⚠️ 재측정 실패 (서버 증설은 완료됨): {str(e)}\""
+            f"}}\n\n"
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        safe_message = str(e).replace('"', "'").replace("\n", " ")
+        yield (
+            f"data: {{"
+            f"\"status\":\"scaling\","
+            f"\"task_id\":\"{task_id}\","
+            f"\"message\":\"⚠️ 재측정 중 예외 발생 (서버 증설은 완료됨): {safe_message}\""
+            f"}}\n\n"
+        )
+
+    if load_test_result_after is not None:
+        final_message = f"✅ 최종 응답시간  P95 {load_test_result_after.latency_p95:.0f}ms"
+    else:
+        final_message = "🎉 진단이 완료됐습니다."
+
+    yield (
+        f"data: {{"
         f"\"status\":\"done\","
         f"\"task_id\":\"{task_id}\","
-        f"\"message\":\"[6/6] 🎉 Scale 완료 ({result.before_replicas} → {result.after_replicas})\""
+        f"\"message\":\"{final_message}\""
         f"}}\n\n"
     )
