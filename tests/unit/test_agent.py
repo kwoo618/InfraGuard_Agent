@@ -2,6 +2,10 @@ from __future__ import annotations
 import pytest
 from datetime import datetime
 import json
+import os
+import sys
+from fastapi.testclient import TestClient
+from typing import Any
 
 # 1. 상단 임시 클래스 제거 후 app.schemas에서 실제 정의된 규격 모델 임포트
 from app.schemas import (
@@ -536,6 +540,7 @@ from app.agent.nodes import (
     execute_scaling_node,
     llm_reasoning_node,
     run_load_test_node,
+    generate_plan_node,
 )
 
 @pytest.mark.asyncio
@@ -2202,3 +2207,1318 @@ async def test_engine_integration_stops_after_node_failure():
     assert reasoning_called is False
     assert result["agent_outcome"] == "failed"
     assert "통합 테스트용 Locust 실패" in result["error"]
+
+# generate_plan.py 단위테스트
+from app.tools.generate_plan import (
+    PlanGenerationError,
+    generate_optimization_plan,
+)
+
+
+def test_generate_plan_with_scaling():
+    result = generate_optimization_plan(
+        target_tps=50,
+        load_test_result=LoadTestResult(
+            tps=30.0,
+            latency_p95=1800.0,
+            latency_avg=900.0,
+            error_rate=0.08,
+            duration=30,
+            total_requests=900,
+        ),
+        system_metrics=SystemMetrics(
+            cpu_pct=92.0,
+            mem_pct=70.0,
+            connection_count=100,
+        ),
+        bottleneck_report=BottleneckReport(
+            cause="CPU 과부하",
+            severity="high",
+            recommendation="컨테이너 확장",
+            confidence=0.94,
+            requires_scaling=True,
+        ),
+        scaling_plan={
+            "service_name": "target-server",
+            "current_replicas": 1,
+            "desired_replicas": 2,
+            "reason": "CPU 과부하",
+        },
+    )
+
+    assert isinstance(result, list)
+    assert result
+    assert "1개에서 2개" in result[0]
+    assert any("CPU 사용률" in plan for plan in result)
+    assert any("사용자 승인" in plan for plan in result)
+
+
+def test_generate_plan_without_scaling():
+    result = generate_optimization_plan(
+        target_tps=30,
+        load_test_result=LoadTestResult(
+            tps=32.0,
+            latency_p95=300.0,
+            latency_avg=150.0,
+            error_rate=0.0,
+            duration=30,
+            total_requests=960,
+        ),
+        system_metrics=SystemMetrics(
+            cpu_pct=40.0,
+            mem_pct=50.0,
+            connection_count=10,
+        ),
+        bottleneck_report=BottleneckReport(
+            cause="병목 없음",
+            severity="low",
+            recommendation="현재 구성 유지",
+            confidence=0.97,
+            requires_scaling=False,
+        ),
+    )
+
+    assert result == ["현재 구성 유지"]
+
+
+def test_generate_plan_requires_scaling_plan():
+    with pytest.raises(
+        PlanGenerationError,
+        match="scaling_plan이 필요합니다",
+    ):
+        generate_optimization_plan(
+            target_tps=50,
+            load_test_result=LoadTestResult(
+                tps=20.0,
+                latency_p95=2000.0,
+                latency_avg=1000.0,
+                error_rate=0.1,
+                duration=30,
+                total_requests=600,
+            ),
+            system_metrics=SystemMetrics(
+                cpu_pct=95.0,
+                mem_pct=80.0,
+                connection_count=120,
+            ),
+            bottleneck_report=BottleneckReport(
+                cause="CPU 과부하",
+                severity="high",
+                recommendation="스케일링",
+                confidence=0.9,
+                requires_scaling=True,
+            ),
+            scaling_plan=None,
+        )
+
+from app.agent.nodes import llm_reasoning_node
+
+@pytest.mark.asyncio
+async def test_reasoning_result_integrates_with_scaling_plan(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    LLM 병목 분석 결과가 스케일링 최적화 플랜으로
+    정상 변환되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state["load_test_result"] = LoadTestResult(
+        tps=30.0,
+        latency_p95=1800.0,
+        latency_avg=900.0,
+        error_rate=0.08,
+        duration=30,
+        total_requests=900,
+    )
+
+    state["system_metrics"] = SystemMetrics(
+        cpu_pct=92.0,
+        mem_pct=70.0,
+        connection_count=100,
+    )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def mock_llm_caller(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        assert system_prompt
+        assert "50" in user_prompt
+        assert "target-server" in user_prompt
+
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "목표 TPS 미달과 CPU 과부하가 확인되었습니다.",
+            "severity": "high",
+            "recommendation": "컨테이너 확장을 권장합니다.",
+            "confidence": 0.94,
+            "requires_scaling": true
+          },
+          "agent_outcome": "awaiting_approval",
+          "scaling_plan": {
+            "service_name": "target-server",
+            "current_replicas": 1,
+            "desired_replicas": 2,
+            "reason": "목표 TPS 미달과 CPU 과부하"
+          }
+        }
+        """
+
+    reasoning_update = await llm_reasoning_node(
+        state,
+        llm_caller=mock_llm_caller,
+    )
+    state.update(reasoning_update)
+
+    assert state["error"] is None
+    assert state["bottleneck_report"] is not None
+    assert state["scaling_plan"] is not None
+    assert state["agent_outcome"] == "awaiting_approval"
+
+    plans = generate_optimization_plan(
+        target_tps=state["target_tps"],
+        load_test_result=state["load_test_result"],
+        system_metrics=state["system_metrics"],
+        bottleneck_report=state["bottleneck_report"],
+        scaling_plan=state["scaling_plan"],
+    )
+
+    assert isinstance(plans, list)
+    assert plans
+    assert any(
+        "1개에서 2개" in plan
+        for plan in plans
+    )
+    assert any(
+        "사용자 승인" in plan
+        for plan in plans
+    )
+    assert any(
+        "CPU 사용률" in plan
+        for plan in plans
+    )
+    assert any(
+        "오류율" in plan
+        for plan in plans
+    )
+    assert any(
+        "P95 응답 시간" in plan
+        for plan in plans
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_result_integrates_without_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    병목과 스케일링이 필요 없는 분석 결과가
+    유지·모니터링 중심 플랜으로 변환되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=30,
+    )
+
+    state["load_test_result"] = LoadTestResult(
+        tps=32.0,
+        latency_p95=300.0,
+        latency_avg=150.0,
+        error_rate=0.0,
+        duration=30,
+        total_requests=960,
+    )
+
+    state["system_metrics"] = SystemMetrics(
+        cpu_pct=40.0,
+        mem_pct=50.0,
+        connection_count=10,
+    )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def mock_llm_caller(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "목표 TPS를 달성했고 병목이 없습니다.",
+            "severity": "low",
+            "recommendation": "현재 구성을 유지합니다.",
+            "confidence": 0.97,
+            "requires_scaling": false
+          },
+          "agent_outcome": "diagnosed",
+          "scaling_plan": null
+        }
+        """
+
+    reasoning_update = await llm_reasoning_node(
+        state,
+        llm_caller=mock_llm_caller,
+    )
+    state.update(reasoning_update)
+
+    assert state["error"] is None
+    assert state["bottleneck_report"] is not None
+    assert state["scaling_plan"] is None
+    assert state["agent_outcome"] == "diagnosed"
+
+    plans = generate_optimization_plan(
+        target_tps=state["target_tps"],
+        load_test_result=state["load_test_result"],
+        system_metrics=state["system_metrics"],
+        bottleneck_report=state["bottleneck_report"],
+        scaling_plan=state["scaling_plan"],
+    )
+
+    assert plans == [
+        "현재 구성을 유지합니다."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_rejects_missing_scaling_plan(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    LLM 진단은 스케일링이 필요하다고 했지만
+    scaling_plan이 누락된 상태를 거부하는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state["load_test_result"] = LoadTestResult(
+        tps=25.0,
+        latency_p95=2000.0,
+        latency_avg=1000.0,
+        error_rate=0.1,
+        duration=30,
+        total_requests=750,
+    )
+
+    state["system_metrics"] = SystemMetrics(
+        cpu_pct=95.0,
+        mem_pct=80.0,
+        connection_count=120,
+    )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def mock_llm_caller(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "CPU 과부하",
+            "severity": "high",
+            "recommendation": "스케일링이 필요합니다.",
+            "confidence": 0.9,
+            "requires_scaling": true
+          },
+          "agent_outcome": "awaiting_approval",
+          "scaling_plan": {
+            "service_name": "target-server",
+            "current_replicas": 1,
+            "desired_replicas": 2,
+            "reason": "CPU 과부하"
+          }
+        }
+        """
+
+    reasoning_update = await llm_reasoning_node(
+        state,
+        llm_caller=mock_llm_caller,
+    )
+    state.update(reasoning_update)
+
+    assert state["bottleneck_report"] is not None
+    assert state["bottleneck_report"].requires_scaling is True
+
+    with pytest.raises(
+        PlanGenerationError,
+        match="scaling_plan이 필요합니다",
+    ):
+        generate_optimization_plan(
+            target_tps=state["target_tps"],
+            load_test_result=state["load_test_result"],
+            system_metrics=state["system_metrics"],
+            bottleneck_report=state["bottleneck_report"],
+            scaling_plan=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_removes_duplicate_actions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    LLM 권장 조치와 규칙 기반 조치가 중복되더라도
+    최종 목록에는 같은 문장이 한 번만 포함되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=30,
+    )
+
+    state["load_test_result"] = LoadTestResult(
+        tps=31.0,
+        latency_p95=300.0,
+        latency_avg=150.0,
+        error_rate=0.0,
+        duration=30,
+        total_requests=930,
+    )
+
+    state["system_metrics"] = SystemMetrics(
+        cpu_pct=40.0,
+        mem_pct=50.0,
+        connection_count=10,
+    )
+
+    monkeypatch.setattr(
+        "app.agent.nodes._get_current_replicas",
+        lambda: 1,
+    )
+
+    async def mock_llm_caller(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return """
+        {
+          "bottleneck_report": {
+            "cause": "병목 없음",
+            "severity": "low",
+            "recommendation": "현재 구성을 유지합니다.",
+            "confidence": 0.98,
+            "requires_scaling": false
+          },
+          "agent_outcome": "diagnosed",
+          "scaling_plan": null
+        }
+        """
+
+    reasoning_update = await llm_reasoning_node(
+        state,
+        llm_caller=mock_llm_caller,
+    )
+    state.update(reasoning_update)
+
+    plans = generate_optimization_plan(
+        target_tps=state["target_tps"],
+        load_test_result=state["load_test_result"],
+        system_metrics=state["system_metrics"],
+        bottleneck_report=state["bottleneck_report"],
+        scaling_plan=state["scaling_plan"],
+    )
+
+    assert len(plans) == len(set(plans))
+
+# optimization_plan Engine 연동 테스트
+def _load_result(
+    *,
+    tps: float = 30.0,
+    latency_p95: float = 1800.0,
+    error_rate: float = 0.08,
+) -> LoadTestResult:
+    return LoadTestResult(
+        tps=tps,
+        latency_p95=latency_p95,
+        latency_avg=latency_p95 / 2,
+        error_rate=error_rate,
+        duration=30,
+        total_requests=int(tps * 30),
+    )
+
+
+def _metrics(
+    *,
+    cpu_pct: float = 92.0,
+) -> SystemMetrics:
+    return SystemMetrics(
+        cpu_pct=cpu_pct,
+        mem_pct=70.0,
+        connection_count=100,
+    )
+
+
+def _report(
+    *,
+    requires_scaling: bool = True,
+) -> BottleneckReport:
+    return BottleneckReport(
+        cause=(
+            "CPU 과부하"
+            if requires_scaling
+            else "병목 없음"
+        ),
+        severity=(
+            "high"
+            if requires_scaling
+            else "low"
+        ),
+        recommendation=(
+            "컨테이너 확장"
+            if requires_scaling
+            else "현재 구성 유지"
+        ),
+        confidence=0.95,
+        requires_scaling=requires_scaling,
+    )
+
+
+def _waiting_state() -> AgentRuntimeState:
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state.update(
+        {
+            "load_test_result": _load_result(),
+            "system_metrics": _metrics(),
+            "bottleneck_report": _report(),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "scaling_approved": None,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "CPU 과부하",
+            },
+            "optimization_plan": [
+                (
+                    "target-server 서비스를 1개에서 "
+                    "2개로 확장합니다. "
+                    "실행 전 사용자 승인이 필요합니다."
+                )
+            ],
+            "loop_count": 1,
+            "error": None,
+        }
+    )
+
+    return state
+
+
+def test_initial_state_has_empty_optimization_plan():
+    """새 작업의 최적화 계획 초기값이 빈 목록인지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+
+    assert "optimization_plan" in state
+    assert state["optimization_plan"] == []
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_node_stores_generated_plan():
+    """진단 결과로 생성한 계획이 state update에 담기는지 확인한다."""
+
+    state = _waiting_state()
+
+    def mock_plan_generator(**kwargs) -> list[str]:
+        assert kwargs["target_tps"] == 50
+        assert kwargs["load_test_result"] is state["load_test_result"]
+        assert kwargs["system_metrics"] is state["system_metrics"]
+        assert kwargs["bottleneck_report"] is state["bottleneck_report"]
+        assert kwargs["scaling_plan"] is state["scaling_plan"]
+
+        return [
+            "target-server를 1개에서 2개로 확장합니다.",
+            "CPU 사용률을 점검합니다.",
+        ]
+
+    update = await generate_plan_node(
+        state,
+        plan_generator=mock_plan_generator,
+    )
+
+    assert update["optimization_plan"] == [
+        "target-server를 1개에서 2개로 확장합니다.",
+        "CPU 사용률을 점검합니다.",
+    ]
+    assert update["error"] is None
+    assert "agent_outcome" not in update
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_node_fails_when_report_is_missing():
+    """BottleneckReport가 없으면 계획 생성을 중단하는지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+    state["load_test_result"] = _load_result()
+    state["system_metrics"] = _metrics()
+
+    generator_called = False
+
+    def must_not_run_generator(**kwargs) -> list[str]:
+        nonlocal generator_called
+        generator_called = True
+        pytest.fail(
+            "bottleneck_report가 없는데 plan generator가 실행됐습니다."
+        )
+
+    update = await generate_plan_node(
+        state,
+        plan_generator=must_not_run_generator,
+    )
+
+    assert generator_called is False
+    assert update["agent_outcome"] == "failed"
+    assert "bottleneck_report" in update["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_result",
+    [
+        "문자열 결과",
+        {"plan": ["잘못된 형식"]},
+        [1, 2, 3],
+    ],
+)
+async def test_generate_plan_node_rejects_invalid_return_type(
+    invalid_result,
+):
+    """plan generator의 반환 형식이 list[str]인지 검사한다."""
+
+    state = _waiting_state()
+
+    def invalid_generator(**kwargs):
+        return invalid_result
+
+    update = await generate_plan_node(
+        state,
+        plan_generator=invalid_generator,
+    )
+
+    assert update["agent_outcome"] == "failed"
+    assert update["waiting_for_approval"] is False
+    assert "최적화 계획 생성 실패" in update["error"]
+
+
+@pytest.mark.asyncio
+async def test_engine_runs_plan_node_after_reasoning():
+    """
+    Engine 순서가 load → metrics → reasoning → plan인지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+    executed: list[str] = []
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("load")
+        return {
+            "load_test_result": _load_result(
+                tps=32.0,
+                latency_p95=300.0,
+                error_rate=0.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("metrics")
+        return {
+            "system_metrics": _metrics(
+                cpu_pct=40.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("reasoning")
+        return {
+            "bottleneck_report": _report(
+                requires_scaling=False,
+            ),
+            "agent_outcome": "diagnosed",
+            "scaling_required": False,
+            "scaling_approved": None,
+            "waiting_for_approval": False,
+            "scaling_plan": None,
+            "loop_count": 1,
+            "error": None,
+        }
+
+    async def fake_plan(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("plan")
+
+        assert current_state["bottleneck_report"] is not None
+        assert current_state["agent_outcome"] == "diagnosed"
+
+        return {
+            "optimization_plan": [
+                "현재 구성을 유지합니다."
+            ],
+            "error": None,
+        }
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        reasoning_node=fake_reasoning,
+        plan_node=fake_plan,
+    )
+
+    assert executed == [
+        "load",
+        "metrics",
+        "reasoning",
+        "plan",
+    ]
+    assert result["optimization_plan"] == [
+        "현재 구성을 유지합니다."
+    ]
+    assert result["agent_outcome"] == "diagnosed"
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_engine_stops_when_plan_node_fails():
+    """plan_node 실패 시 최종 상태가 failed가 되는지 확인한다."""
+
+    state = create_initial_state(
+        target_tps=30,
+        duration=10,
+    )
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "load_test_result": _load_result(),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "system_metrics": _metrics(),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "bottleneck_report": _report(),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "CPU 과부하",
+            },
+            "loop_count": 1,
+            "error": None,
+        }
+
+    async def failed_plan(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "agent_outcome": "failed",
+            "waiting_for_approval": False,
+            "final_answer": None,
+            "error": "최적화 계획 생성 실패",
+        }
+
+    result = await engine.run_diagnosis(
+        state,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        reasoning_node=fake_reasoning,
+        plan_node=failed_plan,
+    )
+
+    assert result["agent_outcome"] == "failed"
+    assert result["waiting_for_approval"] is False
+    assert "최적화 계획 생성 실패" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_revalidation_failure_regenerates_optimization_plan():
+    """
+    재검증 실패 후 reasoning과 plan Node가 다시 실행되어
+    2개 → 3개 계획으로 갱신되는지 확인한다.
+    """
+
+    state = _waiting_state()
+    executed: list[str] = []
+
+    async def fake_scaling(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("scaling")
+        return {
+            "scaling_result": ScalingResult(
+                before_replicas=1,
+                after_replicas=2,
+                success=True,
+            ),
+            "scaling_count": 1,
+            "agent_outcome": "scaled",
+            "waiting_for_approval": False,
+            "error": None,
+        }
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("load")
+        return {
+            "load_test_result": _load_result(
+                tps=36.0,
+                latency_p95=1300.0,
+                error_rate=0.04,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("metrics")
+        return {
+            "system_metrics": _metrics(
+                cpu_pct=82.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_reasoning(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("reasoning")
+        return {
+            "bottleneck_report": BottleneckReport(
+                cause="병목 지속",
+                severity="high",
+                recommendation="추가 확장",
+                confidence=0.9,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "scaling_approved": None,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 2,
+                "desired_replicas": 3,
+                "reason": "성능 개선 부족",
+            },
+            "loop_count": 2,
+            "error": None,
+        }
+
+    async def fake_plan(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        executed.append("plan")
+        assert (
+            current_state["scaling_plan"]["desired_replicas"]
+            == 3
+        )
+
+        return {
+            "optimization_plan": [
+                (
+                    "target-server 서비스를 2개에서 "
+                    "3개로 확장합니다. "
+                    "실행 전 사용자 승인이 필요합니다."
+                )
+            ],
+            "error": None,
+        }
+
+    async def fake_revalidation(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        executed.append("revalidation")
+        return json.dumps(
+            {
+                "summary": "성능 개선이 충분하지 않습니다.",
+                "performance_improved": False,
+                "additional_action_required": True,
+                "recommended_action": "replica 추가 증가",
+            },
+            ensure_ascii=False,
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=fake_scaling,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        reasoning_node=fake_reasoning,
+        plan_node=fake_plan,
+        revalidation_caller=fake_revalidation,
+    )
+
+    assert executed == [
+        "scaling",
+        "load",
+        "metrics",
+        "revalidation",
+        "reasoning",
+        "plan",
+    ]
+    assert result["agent_outcome"] == "awaiting_approval"
+    assert result["scaling_plan"]["desired_replicas"] == 3
+    assert any(
+        "2개에서 3개" in item
+        for item in result["optimization_plan"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_revalidation_success_updates_completion_plan():
+    """
+    스케일링과 재검증 성공 후 기존 권장 계획이
+    완료·모니터링 계획으로 변경되는지 확인한다.
+    """
+
+    state = _waiting_state()
+
+    async def fake_scaling(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "scaling_result": ScalingResult(
+                before_replicas=1,
+                after_replicas=2,
+                success=True,
+            ),
+            "scaling_count": 1,
+            "agent_outcome": "scaled",
+            "waiting_for_approval": False,
+            "error": None,
+        }
+
+    async def fake_load(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "load_test_result": _load_result(
+                tps=55.0,
+                latency_p95=600.0,
+                error_rate=0.01,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_metrics(
+        current_state: AgentRuntimeState,
+    ) -> dict:
+        return {
+            "system_metrics": _metrics(
+                cpu_pct=55.0,
+            ),
+            "agent_outcome": "pending",
+            "error": None,
+        }
+
+    async def fake_revalidation(
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "summary": "TPS와 응답 지연이 개선되었습니다.",
+                "performance_improved": True,
+                "additional_action_required": False,
+                "recommended_action": None,
+            },
+            ensure_ascii=False,
+        )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=True,
+        scaling_node=fake_scaling,
+        load_test_node=fake_load,
+        metrics_node=fake_metrics,
+        revalidation_caller=fake_revalidation,
+    )
+
+    assert result["agent_outcome"] == "scaled"
+    assert result["scaling_plan"] is None
+    assert result["optimization_plan"]
+    assert any(
+        "정상적으로 적용" in item
+        for item in result["optimization_plan"]
+    )
+    assert any(
+        "모니터링" in item
+        for item in result["optimization_plan"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejection_keeps_recommended_plan():
+    """
+    승인 거절 시 기존 최적화 계획을 지우지 않고
+    거절 상태 안내를 추가하는지 확인한다.
+    """
+
+    state = _waiting_state()
+    previous_plan = list(
+        state["optimization_plan"]
+    )
+
+    result = await engine.resume_after_approval(
+        state,
+        approved=False,
+    )
+
+    assert result["agent_outcome"] == "diagnosed"
+    assert result["scaling_approved"] is False
+    assert result["optimization_plan"]
+
+    assert any(
+        "거절" in item
+        for item in result["optimization_plan"]
+    )
+
+    for item in previous_plan:
+        assert item in result["optimization_plan"]
+
+# API 리포트 연동 테스트
+# backend 경로를 import 경로에 추가한다.
+BACKEND_PATH = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "backend",
+    )
+)
+
+if BACKEND_PATH not in sys.path:
+    sys.path.insert(0, BACKEND_PATH)
+
+
+# app.main은 app/static 경로를 사용하므로 테스트 실행 위치에 따라
+# 디렉터리가 없을 경우를 대비한다.
+os.makedirs(
+    os.path.join(BACKEND_PATH, "app", "static"),
+    exist_ok=True,
+)
+
+from app.api.v1 import agent
+from app.api.v1.agent import (
+    remeasurement_results,
+    task_manager,
+)
+from app.main import app
+
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clear_agent_task_storage():
+    """
+    테스트 간 전역 task 상태가 섞이지 않도록 초기화한다.
+    """
+
+    task_manager.states.clear()
+    task_manager.futures.clear()
+    remeasurement_results.clear()
+
+    yield
+
+    task_manager.states.clear()
+    task_manager.futures.clear()
+    remeasurement_results.clear()
+
+
+def _register_state_directly(state):
+    """
+    API 리포트 테스트에서는 승인 Future가 필요하지 않으므로
+    register_task() 대신 states에 직접 저장한다.
+    """
+
+    task_manager.states[state["task_id"]] = state
+    return state["task_id"]
+
+
+def test_report_returns_optimization_plan_before_approval():
+    """
+    Engine이 승인 대기 상태에서 만든 optimization_plan이
+    리포트 응답에 포함되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state.update(
+        {
+            "load_test_result": LoadTestResult(
+                tps=30.0,
+                latency_p95=1800.0,
+                latency_avg=900.0,
+                error_rate=0.08,
+                duration=30,
+                total_requests=900,
+            ),
+            "system_metrics": SystemMetrics(
+                cpu_pct=92.0,
+                mem_pct=70.0,
+                connection_count=100,
+            ),
+            "bottleneck_report": BottleneckReport(
+                cause="목표 TPS 미달과 CPU 과부하",
+                severity="high",
+                recommendation="컨테이너 확장",
+                confidence=0.94,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": "target-server",
+                "current_replicas": 1,
+                "desired_replicas": 2,
+                "reason": "CPU 과부하",
+            },
+            "optimization_plan": [
+                "target-server를 1개에서 2개로 확장합니다.",
+                "실행 전 사용자 승인이 필요합니다.",
+            ],
+            "error": None,
+        }
+    )
+
+    task_id = _register_state_directly(state)
+
+    response = client.get(
+        f"/api/v1/agent/report/{task_id}"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["task_id"] == task_id
+    assert body["outcome"] == "awaiting_approval"
+    assert body["waiting_for_approval"] is True
+
+    assert "optimization_plan" in body
+    assert body["optimization_plan"] == [
+        "target-server를 1개에서 2개로 확장합니다.",
+        "실행 전 사용자 승인이 필요합니다.",
+    ]
+
+
+def test_report_returns_completed_plan_after_scaling():
+    """
+    스케일링과 재검증이 끝난 뒤 완료·모니터링 계획이
+    HTTP 응답에 포함되는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    before = LoadTestResult(
+        tps=28.0,
+        latency_p95=1900.0,
+        latency_avg=950.0,
+        error_rate=0.09,
+        duration=30,
+        total_requests=840,
+    )
+
+    after = LoadTestResult(
+        tps=55.0,
+        latency_p95=600.0,
+        latency_avg=300.0,
+        error_rate=0.01,
+        duration=30,
+        total_requests=1650,
+    )
+
+    state.update(
+        {
+            "load_test_result": before,
+            "system_metrics": SystemMetrics(
+                cpu_pct=55.0,
+                mem_pct=60.0,
+                connection_count=80,
+            ),
+            "bottleneck_report": BottleneckReport(
+                cause="목표 TPS 미달과 CPU 과부하",
+                severity="high",
+                recommendation="컨테이너 확장",
+                confidence=0.95,
+                requires_scaling=True,
+            ),
+            "agent_outcome": "scaled",
+            "scaling_required": False,
+            "scaling_approved": True,
+            "waiting_for_approval": False,
+            "scaling_plan": None,
+            "scaling_result": ScalingResult(
+                before_replicas=1,
+                after_replicas=2,
+                success=True,
+            ),
+            "optimization_plan": [
+                "승인된 스케일링 작업이 정상적으로 적용되었습니다.",
+                "현재 구성을 유지하며 시스템 메트릭을 모니터링합니다.",
+            ],
+            "error": None,
+        }
+    )
+
+    task_id = _register_state_directly(state)
+    remeasurement_results[task_id] = after
+
+    response = client.get(
+        f"/api/v1/agent/report/{task_id}"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["outcome"] == "scaled"
+    assert body["action"]["success"] is True
+    assert body["action"]["before_replicas"] == 1
+    assert body["action"]["after_replicas"] == 2
+
+    assert body["measurement"]["tps"] == 28.0
+    assert body["measurement_after"]["tps"] == 55.0
+    assert body["improvement"]["tps_delta"] == pytest.approx(
+        27.0
+    )
+
+    assert body["optimization_plan"] == [
+        "승인된 스케일링 작업이 정상적으로 적용되었습니다.",
+        "현재 구성을 유지하며 시스템 메트릭을 모니터링합니다.",
+    ]
+
+
+def test_report_keeps_plan_after_user_rejection():
+    """
+    사용자가 스케일링을 거절해도 권장 계획과 거절 안내가
+    리포트에 남아 있는지 확인한다.
+    """
+
+    state = create_initial_state(
+        target_tps=50,
+        duration=30,
+    )
+
+    state.update(
+        {
+            "agent_outcome": "diagnosed",
+            "scaling_required": False,
+            "scaling_approved": False,
+            "waiting_for_approval": False,
+            "optimization_plan": [
+                "사용자가 스케일링 실행을 거절했습니다.",
+                "target-server를 1개에서 2개로 확장하는 것을 권장합니다.",
+            ],
+            "scaling_result": None,
+            "error": None,
+        }
+    )
+
+    task_id = _register_state_directly(state)
+
+    response = client.get(
+        f"/api/v1/agent/report/{task_id}"
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["outcome"] == "diagnosed"
+    assert body["action"] is None
+    assert any(
+        "거절" in item
+        for item in body["optimization_plan"]
+    )
+
+
+def test_report_returns_404_for_unknown_task():
+    """
+    존재하지 않는 task_id는 404를 반환하는지 확인한다.
+    """
+
+    response = client.get(
+        "/api/v1/agent/report/not-found-task"
+    )
+
+    assert response.status_code == 404
+    assert (
+        response.json()["detail"]
+        == "해당 task_id를 찾을 수 없습니다."
+    )

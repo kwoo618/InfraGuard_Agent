@@ -50,6 +50,9 @@ class AgentRuntimeState(TypedDict):
     # 병목을 해결하기 위해 LLM이 생성한 스케일링 계획
     scaling_plan: dict[str, object] | None
 
+    # 병목 진단 결과를 바탕으로 생성한 최적화 조치 목록
+    optimization_plan: list[str]
+
     # 현재 분석 결과에서 스케일링이 필요한지 나타내는 값
     scaling_required: bool
 
@@ -75,6 +78,8 @@ class AgentRuntimeState(TypedDict):
     error: str | None
 
 
+
+
 def create_initial_state(
     target_tps: int,
     duration: int,
@@ -95,6 +100,7 @@ def create_initial_state(
         bottleneck_report=None,
         agent_outcome="pending",
         scaling_plan=None,
+        optimization_plan=[],
         scaling_required=False,
         scaling_approved=None,
         waiting_for_approval=False,

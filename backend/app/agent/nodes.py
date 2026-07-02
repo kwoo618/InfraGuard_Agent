@@ -28,6 +28,9 @@ from app.agent.prompts import (
     SYSTEM_PROMPT,
     build_bottleneck_analysis_prompt,
 )
+from app.tools.generate_plan import (
+    generate_optimization_plan,
+)
 from app.agent.state import AgentOutcome, AgentRuntimeState
 from app.schemas import (
     BottleneckReport,
@@ -61,7 +64,7 @@ MAX_LOOP = int(os.getenv("MAX_LOOP", "10"))
 
 # 테스트에서 실제 API 대신 Mock 함수를 전달할 수 있도록 정의한 타입
 LLMCaller = Callable[[str, str], Awaitable[str]]
-
+PlanGenerator = Callable[..., list[str]]
 
 class NodeExecutionError(RuntimeError):
     """Agent Node 실행 과정에서 발생한 오류."""
@@ -555,6 +558,72 @@ async def llm_reasoning_node(
         failure_update["loop_count"] = state["loop_count"] + 1
         return failure_update
 
+async def generate_plan_node(
+    state: AgentRuntimeState,
+    plan_generator: PlanGenerator = generate_optimization_plan,
+) -> dict[str, Any]:
+    """
+    LLM 병목 진단 결과와 측정값을 바탕으로
+    사용자에게 제공할 최적화 조치 목록을 생성한다.
+
+    실제 인프라 변경은 수행하지 않는다.
+    """
+
+    try:
+        load_test_result = state["load_test_result"]
+        system_metrics = state["system_metrics"]
+        bottleneck_report = state["bottleneck_report"]
+
+        if load_test_result is None:
+            raise NodeExecutionError(
+                "최적화 계획 생성 전에 "
+                "load_test_result가 필요합니다."
+            )
+
+        if system_metrics is None:
+            raise NodeExecutionError(
+                "최적화 계획 생성 전에 "
+                "system_metrics가 필요합니다."
+            )
+
+        if bottleneck_report is None:
+            raise NodeExecutionError(
+                "최적화 계획 생성 전에 "
+                "bottleneck_report가 필요합니다."
+            )
+
+        result = plan_generator(
+            target_tps=state["target_tps"],
+            load_test_result=load_test_result,
+            system_metrics=system_metrics,
+            bottleneck_report=bottleneck_report,
+            scaling_plan=state["scaling_plan"],
+        )
+
+        if not isinstance(result, list):
+            raise NodeExecutionError(
+                "generate_optimization_plan이 "
+                "list를 반환하지 않았습니다."
+            )
+
+        if not all(
+            isinstance(item, str)
+            for item in result
+        ):
+            raise NodeExecutionError(
+                "optimization_plan의 모든 항목은 "
+                "문자열이어야 합니다."
+            )
+
+        return {
+            "optimization_plan": result,
+            "error": None,
+        }
+
+    except Exception as exc:
+        return _create_failure_update(
+            f"최적화 계획 생성 실패: {exc}"
+        )
 
 async def execute_scaling_node(
     state: AgentRuntimeState,
