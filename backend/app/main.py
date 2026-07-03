@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -18,4 +20,10 @@ app.add_middleware(
 app.include_router(agent_router, prefix="/api/v1")
 
 
-app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
+# 상대경로("app/static")는 실행 시점의 cwd에 따라 깨진다.
+# 루트에서 `pytest tests/`를 돌리면 cwd가 backend/가 아니라서
+# RuntimeError: Directory 'app/static' does not exist가 났었다.
+# 이 파일(main.py) 위치 기준 절대경로로 고정해서 cwd와 무관하게 동작하도록 한다.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

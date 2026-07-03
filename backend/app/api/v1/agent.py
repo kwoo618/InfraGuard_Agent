@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,12 @@ from app.agent.state import AgentRuntimeState, create_initial_state
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
 router = APIRouter()
+
+# 디버그 전용 기능(force_scaling) 활성화 여부.
+# 인증 없이 URL 파라미터 하나로 실제 Docker 스케일링을 유발할 수 있는 기능이라,
+# 로컬 개발 환경에서만 명시적으로 켜도록 기본값을 꺼짐(false)으로 둔다.
+# 켜려면 .env에 DEBUG_ENDPOINTS_ENABLED=true 추가.
+DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() == "true"
 
 
 def _sse(status: str, task_id: str | None, message: str) -> str:
@@ -175,17 +182,25 @@ async def get_report(task_id: str):
 # 📤 [GET] 실시간 진단 로그 스트리밍 엔드포인트
 # =================================================================
 @router.get("/agent/start")
-async def start_agent(target_tps: int = 30, duration: int = 10):
+async def start_agent(target_tps: int = 30, duration: int = 10, force_scaling: bool = False):
     """
     [진단 시작] 버튼을 누르면 호출되는 SSE 스트리밍 엔드포인트입니다.
+
+    force_scaling=true로 호출하면, 실제 LLM이 "병목 없음"으로 판단해도
+    강제로 스케일링 승인 흐름(need_approval → scaling → remeasuring)을
+    태워서 HITL·스케일링·재검증 UI/배선을 수동으로 테스트할 수 있습니다.
+    (디버그/개발용 — 부하테스트·메트릭·스케일링·재검증 자체는 전부 진짜로 실행됨)
+
+    .env에 DEBUG_ENDPOINTS_ENABLED=true가 없으면 force_scaling은 무시됩니다.
+    인증 없이 실제 Docker 스케일링을 유발할 수 있는 기능이라 기본값은 꺼짐입니다.
     """
     return StreamingResponse(
-        start_agent_stream(target_tps, duration),
+        start_agent_stream(target_tps, duration, force_scaling),
         media_type="text/event-stream"
     )
 
 
-async def start_agent_stream(target_tps: int = 30, duration: int = 10):
+async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_scaling: bool = False):
     """
     인프라 자율 진단 및 조치 프로세스를 실시간으로 스트리밍하는 핵심 로직.
 
@@ -245,6 +260,40 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10):
         )
 
     yield _sse("analyzing", task_id, "🧠 AI 분석 완료")
+
+    # ---- [디버그 전용] force_scaling=true인데 실제로는 병목이 없다고 판단된 경우 ----
+    # HITL 승인 → 스케일링 → 재검증 흐름을 수동으로 테스트하기 위해,
+    # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
+    # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
+    if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
+        yield _sse(
+            "analyzing",
+            task_id,
+            "⚠️ [디버그] force_scaling이 요청됐지만 DEBUG_ENDPOINTS_ENABLED가 꺼져있어 무시합니다.",
+        )
+
+    if force_scaling and DEBUG_ENDPOINTS_ENABLED and state["agent_outcome"] == "diagnosed":
+        from app.tools.scale_service import SERVICE_NAME, get_current_replicas
+
+        current_replicas = max(get_current_replicas(), 1)
+
+        yield _sse("analyzing", task_id, "🧪 [디버그] force_scaling=true — 병목 판단을 강제로 덮어씁니다.")
+
+        state.update({
+            "agent_outcome": "awaiting_approval",
+            "scaling_required": True,
+            "waiting_for_approval": True,
+            "scaling_plan": {
+                "service_name": SERVICE_NAME,
+                "current_replicas": current_replicas,
+                "desired_replicas": current_replicas + 1,
+                "reason": "[디버그] force_scaling 파라미터로 강제 지정된 사유입니다.",
+            },
+            "final_answer": (
+                f"[디버그] {SERVICE_NAME}를 {current_replicas}개에서 "
+                f"{current_replicas + 1}개로 강제 확장 테스트를 진행합니다."
+            ),
+        })
 
     # =================================================================
     # [5~6단계: 승인 → 스케일링 → 재검증] — ReAct Loop
