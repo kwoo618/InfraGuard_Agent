@@ -134,6 +134,13 @@ async function fetchReport(taskId) {
             appendLog(actionMsg, actionType);
         }
 
+        if (report.optimization_plan && report.optimization_plan.length > 0) {
+            appendLog('📋 최적화 조치 목록', 'info');
+            report.optimization_plan.forEach((item, idx) => {
+                appendLog(`  ${idx + 1}. ${item}`, 'info');
+            });
+        }
+
     } catch (error) {
         appendLog("리포트 조회 중 오류가 발생했습니다.", "error");
     }

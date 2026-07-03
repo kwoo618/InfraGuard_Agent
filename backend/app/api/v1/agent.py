@@ -113,8 +113,8 @@ async def approve_task(req: ApprovalRequest):
 async def get_report(task_id: str):
     """
     측정값(load_test_result), LLM 병목 진단(bottleneck_report),
-    스케일링 조치(scaling_result), 그리고 LLM이 생성한 최종 요약(final_answer)을
-    함께 반환합니다.
+    최적화 조치 목록(optimization_plan), 스케일링 조치(scaling_result),
+    그리고 LLM이 생성한 최종 요약(final_answer)을 함께 반환합니다.
     """
     state = task_manager.states.get(task_id)
 
@@ -155,6 +155,8 @@ async def get_report(task_id: str):
             "error_message": scaling_result.error_message,
         }
 
+    optimization_plan = state.get("optimization_plan") or []
+
     return {
         "task_id": task_id,
         "outcome": state.get("agent_outcome"),           # diagnosed / awaiting_approval / scaled / failed 등
@@ -163,6 +165,7 @@ async def get_report(task_id: str):
         "measurement": measurement,   # 가장 최근 부하 테스트 결과 (스케일링 후 재검증했다면 그 이후 값)
         "bottleneck": bottleneck,     # LLM 병목 진단 결과
         "action": action,             # 실제 스케일링 조치 결과 (없으면 None = 스케일링 없었음)
+        "optimization_plan": optimization_plan,   # 최적화 조치 목록 (generate_plan_node 결과)
         "summary": state.get("final_answer"),   # LLM이 생성한 자연어 최종 요약
         "error": state.get("error"),
     }
