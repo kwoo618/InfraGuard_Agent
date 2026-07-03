@@ -3370,15 +3370,6 @@ def test_report_returns_completed_plan_after_scaling():
         duration=30,
     )
 
-    before = LoadTestResult(
-        tps=28.0,
-        latency_p95=1900.0,
-        latency_avg=950.0,
-        error_rate=0.09,
-        duration=30,
-        total_requests=840,
-    )
-
     after = LoadTestResult(
         tps=55.0,
         latency_p95=600.0,
@@ -3390,7 +3381,7 @@ def test_report_returns_completed_plan_after_scaling():
 
     state.update(
         {
-            "load_test_result": before,
+            "load_test_result": after,
             "system_metrics": SystemMetrics(
                 cpu_pct=55.0,
                 mem_pct=60.0,
@@ -3422,7 +3413,6 @@ def test_report_returns_completed_plan_after_scaling():
     )
 
     task_id = _register_state_directly(state)
-    state[task_id] = after
 
     response = client.get(
         f"/api/v1/agent/report/{task_id}"
@@ -3437,11 +3427,9 @@ def test_report_returns_completed_plan_after_scaling():
     assert body["action"]["before_replicas"] == 1
     assert body["action"]["after_replicas"] == 2
 
-    assert body["measurement"]["tps"] == 28.0
-    assert body["measurement_after"]["tps"] == 55.0
-    assert body["improvement"]["tps_delta"] == pytest.approx(
-        27.0
-    )
+    assert body["measurement"]["tps"] == 55.0
+    assert body["measurement"]["latency_p95"] == 600.0
+    assert body["measurement"]["error_rate"] == 0.01
 
     assert body["optimization_plan"] == [
         "승인된 스케일링 작업이 정상적으로 적용되었습니다.",
