@@ -111,6 +111,14 @@ async function fetchReport(taskId) {
 
         const report = await response.json();
 
+        if (report.bottleneck) {
+            appendLog(
+                `🧠 병목 진단 — ${report.bottleneck.cause} (심각도: ${report.bottleneck.severity} / 신뢰도: ${(report.bottleneck.confidence * 100).toFixed(0)}%)`,
+                'info'
+            );
+            appendLog(`💡 권장 조치 — ${report.bottleneck.recommendation}`, 'info');
+        }
+
         if (report.measurement) {
             appendLog(
                 `📊 측정값 — TPS: ${report.measurement.tps.toFixed(1)} / P95: ${report.measurement.latency_p95.toFixed(0)}ms / 에러율: ${(report.measurement.error_rate * 100).toFixed(1)}%`,
@@ -124,25 +132,6 @@ async function fetchReport(taskId) {
                 ? `🔧 조치 — Scale-out 완료 (${report.action.before_replicas} → ${report.action.after_replicas})`
                 : `🔧 조치 실패 — ${report.action.error_message}`;
             appendLog(actionMsg, actionType);
-        } else {
-            appendLog("🔧 조치 — 아직 스케일링이 실행되지 않았습니다.", 'info');
-        }
-
-        if (report.measurement_after) {
-            appendLog(
-                `📈 재측정 — TPS: ${report.measurement_after.tps.toFixed(1)} / P95: ${report.measurement_after.latency_p95.toFixed(0)}ms / 에러율: ${(report.measurement_after.error_rate * 100).toFixed(1)}%`,
-                'info'
-            );
-        }
-
-        if (report.improvement) {
-            const latencyDelta = report.improvement.latency_p95_delta;
-            const tpsDelta = report.improvement.tps_delta;
-            const improved = latencyDelta < 0;   // P95가 줄었으면 개선
-            appendLog(
-                `${improved ? '✨' : '⚠️'} 개선 결과 — TPS ${tpsDelta >= 0 ? '+' : ''}${tpsDelta.toFixed(1)}, P95 ${latencyDelta >= 0 ? '+' : ''}${latencyDelta.toFixed(0)}ms`,
-                improved ? 'success' : 'warning'
-            );
         }
 
     } catch (error) {
