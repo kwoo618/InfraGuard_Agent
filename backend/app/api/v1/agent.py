@@ -18,6 +18,13 @@ router = APIRouter()
 # 켜려면 .env에 DEBUG_ENDPOINTS_ENABLED=true 추가.
 DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() == "true"
 
+# engine.resume_after_approval()이 재검증을 마치면 state["load_test_result"]는
+# "스케일링 전" 값이 아니라 "재검증(스케일링 후)" 값으로 덮어써진다(before/after를
+# 따로 안 들고 있음). /report에서 전/후 비교를 보여주려면 "전" 값을 스케일링 호출
+# 직전에 별도로 스냅샷해둬야 하는데, state.py 스펙은 건드리지 않기 위해 agent.py
+# 자체 저장소에 따로 보관한다. key: task_id, value: LoadTestResult(스케일링 전).
+before_measurements: dict[str, "LoadTestResult"] = {}
+
 
 def _sse(status: str, task_id: str | None, message: str) -> str:
     """
@@ -119,7 +126,7 @@ async def approve_task(req: ApprovalRequest):
 @router.get("/agent/report/{task_id}")
 async def get_report(task_id: str):
     """
-    측정값(load_test_result), LLM 병목 진단(bottleneck_report),
+    측정값(load_test_result, 스케일링 전/후), LLM 병목 진단(bottleneck_report),
     최적화 조치 목록(optimization_plan), 스케일링 조치(scaling_result),
     그리고 LLM이 생성한 최종 요약(final_answer)을 함께 반환합니다.
     """
@@ -131,17 +138,38 @@ async def get_report(task_id: str):
     load_test_result = state.get("load_test_result")
     scaling_result = state.get("scaling_result")
     bottleneck_report = state.get("bottleneck_report")
+    before_load_test_result = before_measurements.get(task_id)
+
+    def _serialize_measurement(result):
+        if result is None:
+            return None
+        return {
+            "tps": result.tps,
+            "error_rate": result.error_rate,
+            "latency_p95": result.latency_p95,   # ms
+            "latency_avg": result.latency_avg,   # ms
+            "total_requests": result.total_requests,
+            "duration": result.duration,          # 초
+        }
 
     measurement = None
-    if load_test_result is not None:
-        measurement = {
-            "tps": load_test_result.tps,
-            "error_rate": load_test_result.error_rate,
-            "latency_p95": load_test_result.latency_p95,   # ms
-            "latency_avg": load_test_result.latency_avg,   # ms
-            "total_requests": load_test_result.total_requests,
-            "duration": load_test_result.duration,          # 초
-        }
+    measurement_after = None
+    improvement = None
+
+    if before_load_test_result is not None and scaling_result is not None:
+        # 스케일링이 실제로 일어난 경우: 전/후를 분리해서 보여준다.
+        measurement = _serialize_measurement(before_load_test_result)
+        measurement_after = _serialize_measurement(load_test_result)
+
+        if measurement_after is not None:
+            improvement = {
+                "tps_delta": measurement_after["tps"] - measurement["tps"],
+                "latency_p95_delta": measurement_after["latency_p95"] - measurement["latency_p95"],   # 음수면 개선
+                "error_rate_delta": measurement_after["error_rate"] - measurement["error_rate"],
+            }
+    else:
+        # 스케일링이 없었던 경우(병목 없음 등): 측정값이 하나뿐이다.
+        measurement = _serialize_measurement(load_test_result)
 
     bottleneck = None
     if bottleneck_report is not None:
@@ -169,7 +197,9 @@ async def get_report(task_id: str):
         "outcome": state.get("agent_outcome"),           # diagnosed / awaiting_approval / scaled / failed 등
         "waiting_for_approval": state.get("waiting_for_approval", False),
         "loop_count": state.get("loop_count"),
-        "measurement": measurement,   # 가장 최근 부하 테스트 결과 (스케일링 후 재검증했다면 그 이후 값)
+        "measurement": measurement,           # 스케일링 전(또는 유일한) 측정값
+        "measurement_after": measurement_after,   # 스케일링 후 재검증 측정값 (스케일링 없었으면 None)
+        "improvement": improvement,               # 전/후 개선폭 (스케일링 없었으면 None)
         "bottleneck": bottleneck,     # LLM 병목 진단 결과
         "action": action,             # 실제 스케일링 조치 결과 (없으면 None = 스케일링 없었음)
         "optimization_plan": optimization_plan,   # 최적화 조치 목록 (generate_plan_node 결과)
@@ -265,12 +295,13 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
     # HITL 승인 → 스케일링 → 재검증 흐름을 수동으로 테스트하기 위해,
     # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
     # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
+    #
+    # main.js가 force_scaling=true를 매 요청마다 자동으로 보내기 때문에,
+    # DEBUG_ENDPOINTS_ENABLED가 꺼져있는(=정상적인 프로덕션/일반 사용자) 경우에도
+    # 이 분기를 매번 타게 된다. 화면에 디버그 경고를 노출하면 사용자가 오해할 수
+    # 있으므로, 꺼져있을 땐 조용히 무시하고 서버 콘솔에만 남긴다.
     if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
-        yield _sse(
-            "analyzing",
-            task_id,
-            "⚠️ [디버그] force_scaling이 요청됐지만 DEBUG_ENDPOINTS_ENABLED가 꺼져있어 무시합니다.",
-        )
+        print(f"[force_scaling] 무시됨 (DEBUG_ENDPOINTS_ENABLED=false) task_id={task_id}")
 
     if force_scaling and DEBUG_ENDPOINTS_ENABLED and state["agent_outcome"] == "diagnosed":
         from app.tools.scale_service import SERVICE_NAME, get_current_replicas
@@ -327,6 +358,11 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
 
         # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
         approved = await task_manager.wait_for_approval(task_id)
+
+        # resume_after_approval()이 재검증하면서 load_test_result를 "이후" 값으로
+        # 덮어쓰기 전에, "이전" 값을 스냅샷해둔다. (다회차 루프에서도 최초 1회만 저장)
+        if task_id not in before_measurements and state.get("load_test_result") is not None:
+            before_measurements[task_id] = state["load_test_result"]
 
         state = await resume_after_approval(state, approved)
 
