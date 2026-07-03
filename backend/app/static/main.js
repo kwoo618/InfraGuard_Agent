@@ -126,6 +126,23 @@ async function fetchReport(taskId) {
             );
         }
 
+        if (report.measurement_after) {
+            appendLog(
+                `📈 재검증 — TPS: ${report.measurement_after.tps.toFixed(1)} / P95: ${report.measurement_after.latency_p95.toFixed(0)}ms / 에러율: ${(report.measurement_after.error_rate * 100).toFixed(1)}%`,
+                'info'
+            );
+        }
+
+        if (report.improvement) {
+            const latencyDelta = report.improvement.latency_p95_delta;
+            const tpsDelta = report.improvement.tps_delta;
+            const improved = latencyDelta < 0;   // P95가 줄었으면 개선
+            appendLog(
+                `${improved ? '✨' : '⚠️'} 개선 결과 — TPS ${tpsDelta >= 0 ? '+' : ''}${tpsDelta.toFixed(1)}, P95 ${latencyDelta >= 0 ? '+' : ''}${latencyDelta.toFixed(0)}ms`,
+                improved ? 'success' : 'warning'
+            );
+        }
+
         if (report.action) {
             const actionType = report.action.success ? 'success' : 'error';
             const actionMsg = report.action.success
@@ -181,8 +198,11 @@ startBtn.addEventListener('click', () => {
         eventSource.close();
     }
 
+    // force_scaling=true는 항상 요청하지만, 실제로 힘을 쓰는지는 서버의
+    // DEBUG_ENDPOINTS_ENABLED(.env)가 결정한다. 꺼져있으면 서버가 조용히 무시하고
+    // 평소처럼 실제 LLM 판단대로 진행되므로, 매번 붙여 보내도 안전하다.
     eventSource = new EventSource(
-        `/api/v1/agent/start?target_tps=${encodeURIComponent(targetTps)}&duration=${encodeURIComponent(duration)}`
+        `/api/v1/agent/start?target_tps=${encodeURIComponent(targetTps)}&duration=${encodeURIComponent(duration)}&force_scaling=true`
     );
 
     eventSource.onmessage = function (event) {
