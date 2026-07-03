@@ -3253,6 +3253,7 @@ os.makedirs(
 
 from app.api.v1 import agent
 from app.api.v1.agent import (
+    before_measurements,
     task_manager,
 )
 from app.main import app
@@ -3269,11 +3270,13 @@ def clear_agent_task_storage():
 
     task_manager.states.clear()
     task_manager.futures.clear()
+    before_measurements.clear()
 
     yield
 
     task_manager.states.clear()
     task_manager.futures.clear()
+    before_measurements.clear()
 
 
 def _register_state_directly(state):
@@ -3295,6 +3298,15 @@ def test_report_returns_optimization_plan_before_approval():
     state = create_initial_state(
         target_tps=50,
         duration=30,
+    )
+
+    before = LoadTestResult(
+        tps=28.0,
+        latency_p95=1900.0,
+        latency_avg=950.0,
+        error_rate=0.09,
+        duration=30,
+        total_requests=840,
     )
 
     after = LoadTestResult(
@@ -3339,6 +3351,8 @@ def test_report_returns_optimization_plan_before_approval():
     )
 
     task_id = _register_state_directly(state)
+
+    before_measurements[task_id] = before
 
     response = client.get(
         f"/api/v1/agent/report/{task_id}"
