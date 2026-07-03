@@ -146,6 +146,7 @@ class AgentRuntimeState(TypedDict):
     agent_outcome: AgentOutcome
 
     scaling_plan: dict[str, object] | None
+    optimization_plan: list[str]
     scaling_required: bool
     scaling_approved: bool | None
     waiting_for_approval: bool

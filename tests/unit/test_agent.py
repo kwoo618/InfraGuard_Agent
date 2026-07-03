@@ -3243,31 +3243,16 @@ async def test_rejection_keeps_recommended_plan():
     for item in previous_plan:
         assert item in result["optimization_plan"]
 
-# API 리포트 연동 테스트
-# backend 경로를 import 경로에 추가한다.
-BACKEND_PATH = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "backend",
-    )
-)
-
-if BACKEND_PATH not in sys.path:
-    sys.path.insert(0, BACKEND_PATH)
-
 
 # app.main은 app/static 경로를 사용하므로 테스트 실행 위치에 따라
 # 디렉터리가 없을 경우를 대비한다.
 os.makedirs(
-    os.path.join(BACKEND_PATH, "app", "static"),
+    os.path.join("app", "static"),
     exist_ok=True,
 )
 
 from app.api.v1 import agent
 from app.api.v1.agent import (
-    remeasurement_results,
     task_manager,
 )
 from app.main import app
@@ -3284,13 +3269,11 @@ def clear_agent_task_storage():
 
     task_manager.states.clear()
     task_manager.futures.clear()
-    remeasurement_results.clear()
 
     yield
 
     task_manager.states.clear()
     task_manager.futures.clear()
-    remeasurement_results.clear()
 
 
 def _register_state_directly(state):
@@ -3314,26 +3297,28 @@ def test_report_returns_optimization_plan_before_approval():
         duration=30,
     )
 
+    after = LoadTestResult(
+        tps=55.0,
+        latency_p95=600.0,
+        latency_avg=300.0,
+        error_rate=0.01,
+        duration=30,
+        total_requests=1650,
+    )
+
     state.update(
         {
-            "load_test_result": LoadTestResult(
-                tps=30.0,
-                latency_p95=1800.0,
-                latency_avg=900.0,
-                error_rate=0.08,
-                duration=30,
-                total_requests=900,
-            ),
+            "load_test_result": after,
             "system_metrics": SystemMetrics(
-                cpu_pct=92.0,
-                mem_pct=70.0,
-                connection_count=100,
+                cpu_pct=55.0,
+                mem_pct=60.0,
+                connection_count=80,
             ),
             "bottleneck_report": BottleneckReport(
                 cause="목표 TPS 미달과 CPU 과부하",
                 severity="high",
                 recommendation="컨테이너 확장",
-                confidence=0.94,
+                confidence=0.95,
                 requires_scaling=True,
             ),
             "agent_outcome": "awaiting_approval",
@@ -3437,7 +3422,7 @@ def test_report_returns_completed_plan_after_scaling():
     )
 
     task_id = _register_state_directly(state)
-    remeasurement_results[task_id] = after
+    state[task_id] = after
 
     response = client.get(
         f"/api/v1/agent/report/{task_id}"
