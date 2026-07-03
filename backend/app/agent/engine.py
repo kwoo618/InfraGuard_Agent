@@ -25,6 +25,7 @@ from app.agent.nodes import (
     call_solar_api,
     collect_metrics_node,
     execute_scaling_node,
+    generate_plan_node,
     llm_reasoning_node,
     run_load_test_node,
 )
@@ -141,7 +142,7 @@ async def _run_node(
             node.__class__.__name__,
         )
         raise AgentEngineError(
-            f"{node.__name__}가 dict를 반환하지 않았습니다."
+            f"{node_name}가 dict를 반환하지 않았습니다."
         )
 
     return _apply_update(state, update)
@@ -226,6 +227,7 @@ async def _revalidate_after_scaling(
     load_test_node: AgentNode,
     metrics_node: AgentNode,
     reasoning_node: AgentNode,
+    plan_node: AgentNode,
     revalidation_caller: RevalidationCaller,
 ) -> AgentRuntimeState:
     """
@@ -320,6 +322,21 @@ async def _revalidate_after_scaling(
                 "scaling_approved": True,
                 "waiting_for_approval": False,
                 "scaling_plan": None,
+                "optimization_plan": [
+                    (
+                        "승인된 스케일링 작업이 "
+                        "정상적으로 적용되었습니다."
+                    ),
+                    (
+                        "재검증 결과: "
+                        f"{summary}"
+                    ),
+                    (
+                        "현재 구성을 유지하며 TPS와 "
+                        "시스템 메트릭을 지속적으로 "
+                        "모니터링합니다."
+                    ),
+                ],
                 "final_answer": (
                     "스케일링 후 재검증 완료: "
                     f"{summary}"
@@ -353,6 +370,14 @@ async def _revalidate_after_scaling(
 
     if _is_failed(state):
         return state
+    
+    state = await _run_node(
+        state,
+        plan_node,
+    )
+
+    if _is_failed(state):
+        return state
 
     revalidation_message = (
         f"스케일링 후 재검증 결과: {summary}"
@@ -382,6 +407,7 @@ async def run_diagnosis(
     load_test_node: AgentNode | None = None,
     metrics_node: AgentNode | None = None,
     reasoning_node: AgentNode | None = None,
+    plan_node: AgentNode | None = None,
 ) -> AgentRuntimeState:
     """
     부하 테스트, 메트릭 수집, LLM 분석까지 실행한다.
@@ -399,6 +425,9 @@ async def run_diagnosis(
 
     reasoning_node = (
         reasoning_node or llm_reasoning_node
+    )
+    plan_node = (
+        plan_node or generate_plan_node
     )
 
     try:
@@ -428,6 +457,14 @@ async def run_diagnosis(
                 reasoning_node,
             )
 
+            if _is_failed(state):
+                return state
+
+            state = await _run_node(
+                state,
+                plan_node,
+            )
+
             return state
 
     except TimeoutError:
@@ -453,6 +490,7 @@ async def start_agent(
     load_test_node: AgentNode | None = None,
     metrics_node: AgentNode | None = None,
     reasoning_node: AgentNode | None = None,
+    plan_node: AgentNode | None = None,
 ) -> AgentRuntimeState:
     """
     새로운 Agent 작업을 생성하고 최초 진단을 실행한다.
@@ -480,6 +518,7 @@ async def start_agent(
                 load_test_node=load_test_node,
                 metrics_node=metrics_node,
                 reasoning_node=reasoning_node,
+                plan_node=plan_node,
                 )
 
     except TimeoutError:
@@ -506,6 +545,7 @@ async def resume_after_approval(
     load_test_node: AgentNode | None = None,
     metrics_node: AgentNode | None = None,
     reasoning_node: AgentNode | None = None,
+    plan_node: AgentNode | None = None,
     revalidation_caller: (
         RevalidationCaller | None
     ) = None,
@@ -530,6 +570,10 @@ async def resume_after_approval(
         reasoning_node or llm_reasoning_node
     )
 
+    plan_node = (
+        plan_node or generate_plan_node
+    )
+
     revalidation_caller = (
         revalidation_caller or call_solar_api
     )
@@ -547,14 +591,20 @@ async def resume_after_approval(
     state["waiting_for_approval"] = False
 
     if not approved:
+        existing_plan = state["optimization_plan"]
+
         state.update(
             {
                 "agent_outcome": "diagnosed",
                 "scaling_required": False,
+                "optimization_plan": [
+                    "사용자가 스케일링 실행을 거절했습니다.",
+                    *existing_plan,
+                ],
                 "final_answer": (
                     "사용자가 스케일링 제안을 "
                     "거절했습니다. "
-                    "진단 결과만 유지합니다."
+                    "진단 결과와 권장 계획만 유지합니다."
                 ),
                 "error": None,
             }
@@ -606,6 +656,7 @@ async def resume_after_approval(
                 load_test_node=load_test_node,
                 metrics_node=metrics_node,
                 reasoning_node=reasoning_node,
+                plan_node=plan_node,
                 revalidation_caller=(
                     revalidation_caller
                 ),
