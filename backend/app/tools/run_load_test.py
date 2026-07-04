@@ -105,6 +105,7 @@ def run_load_test(
             "--csv",
             csv_prefix,            # 통계 결과를 csv_prefix_*.csv 로 저장
             "--only-summary",      # 매 요청 로그 대신 요약만 출력 (stdout 노이즈 감소)
+            "--exit-code-on-error", "0",  # 요청 실패(예: /flaky 500)로는 non-zero 종료 안 함
         ]
 
         # subprocess.Popen으로 비동기 실행 후 communicate()로 종료를 기다린다.
@@ -126,14 +127,16 @@ def run_load_test(
             process.kill()
             raise LoadTestError(f"Locust 실행이 {duration + 60}초를 초과해 타임아웃 되었습니다.")
 
-        if process.returncode != 0:
-            # Locust 자체가 에러로 죽은 경우 (예: locustfile 문법 오류, host 연결 실패 등)
-            raise LoadTestError(f"Locust 실행 실패 (exit={process.returncode}): {stderr}")
-
         stats_path = Path(f"{csv_prefix}_stats.csv")
+
+        # CSV 존재 여부를 exit code보다 우선 판단한다.
+        # CSV가 있으면 Locust가 정상 완주한 것이므로 exit code와 무관하게 파싱한다.
+        # (--exit-code-on-error 0으로 요청 실패는 exit 1을 내지 않지만, 이중 방어로 유지)
         if not stats_path.exists():
-            # returncode가 0이어도 CSV가 안 만들어지는 비정상 케이스 방어
-            raise LoadTestError(f"Locust 결과 파일을 찾을 수 없습니다: {stats_path}")
+            # CSV가 없으면 Locust 자체가 크래시한 것 (문법 오류, host 연결 실패 등)
+            raise LoadTestError(
+                f"Locust 결과 파일을 찾을 수 없습니다 (exit={process.returncode}): {stderr}"
+            )
 
         return _parse_stats_csv(stats_path, duration)
 
@@ -158,11 +161,18 @@ def _parse_stats_csv(stats_path: Path, duration: int) -> LoadTestResult:
     # 0으로 나누기 방지: 요청이 한 건도 없었다면 error_rate는 0으로 처리
     error_rate = (failure_count / total_requests) if total_requests > 0 else 0.0
 
+    def _safe_float(value: str, default: float = 0.0) -> float:
+        # 테스트 시간이 너무 짧거나 요청 수가 적으면 Locust가 'N/A'를 기록한다.
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
     return LoadTestResult(
-        tps=float(aggregated["Requests/s"]),            # Locust가 직접 측정한 실측 TPS
-        latency_p95=float(aggregated["95%"]),            # 95th percentile 응답시간 (ms)
-        latency_avg=float(aggregated["Average Response Time"]),  # 평균 응답시간 (ms)
-        error_rate=error_rate,                           # 0.0~1.0 사이 실패율
-        duration=duration,                               # 호출 시점에 받은 목표 duration 그대로 기록
+        tps=_safe_float(aggregated["Requests/s"]),
+        latency_p95=_safe_float(aggregated["95%"]),
+        latency_avg=_safe_float(aggregated["Average Response Time"]),
+        error_rate=error_rate,
+        duration=duration,
         total_requests=total_requests,
     )
