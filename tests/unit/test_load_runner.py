@@ -101,10 +101,11 @@ def test_run_load_test_rejects_non_positive_duration():
         run_load_test(target_tps=10, duration=0)
 
 
-def test_run_load_test_raises_on_nonzero_exit():
-    """Locust 프로세스가 비정상 종료(exit != 0)하면 LoadTestError로 변환되는지 확인.
+def test_run_load_test_raises_on_nonzero_exit_without_csv():
+    """Locust가 크래시(exit != 0)하고 CSV도 없으면 LoadTestError.
 
-    예: locustfile 문법 오류, target-server 연결 실패 등 Locust 자체가 죽는 경우.
+    진짜 크래시 판정 기준은 CSV 부재이며, exit code는 보조 정보로만 쓴다.
+    예: locustfile 문법 오류, target-server 연결 실패 등.
     """
     with patch(
         "app.tools.run_load_test.subprocess.Popen",
@@ -112,6 +113,22 @@ def test_run_load_test_raises_on_nonzero_exit():
     ):
         with pytest.raises(LoadTestError):
             run_load_test(target_tps=10, duration=5)
+
+
+def test_run_load_test_succeeds_with_nonzero_exit_when_csv_exists(tmp_path):
+    """/flaky 실패로 exit=1이더라도 CSV가 있으면 LoadTestResult를 정상 반환.
+
+    Locust 기본 동작: 요청 실패가 1건이라도 있으면 exit 1.
+    --exit-code-on-error 0으로 막지만, CSV 존재 우선 판단으로 이중 방어.
+    """
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, returncode=1, write_csv=True),
+    ):
+        result = run_load_test(target_tps=10, duration=5)
+
+    assert isinstance(result, LoadTestResult)
+    assert result.total_requests == 900
 
 
 def test_run_load_test_raises_when_stats_csv_missing():
