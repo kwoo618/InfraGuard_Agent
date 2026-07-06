@@ -257,7 +257,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
 
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get("http://localhost:9090/", timeout=3.0)
+            response = await client.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/", timeout=3.0)
             if response.status_code not in [200, 302]:
                 yield _sse("failed", task_id, f"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})")
                 return
