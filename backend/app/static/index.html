@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="stylesheet" href="style.css?v=4">
 </head>
 
 <body>
@@ -15,16 +15,12 @@
         <h1>🛡️ InfraGuard Agent 제어 대시보드</h1>
         <p>인프라 자율 진단 및 스케일링 에이전트 시스템</p>
 
-        <!-- ================= Agent Status ================= -->
-
         <div class="status-panel">
             <span>Agent Status</span>
             <span id="agent-status" class="status ready">
                 🟢 READY
             </span>
         </div>
-
-        <!-- ================= Progress Timeline ================= -->
 
         <div class="progress-timeline">
 
@@ -96,6 +92,17 @@
             </button>
         </div>
 
+
+        <div id="load-test-progress-container" class="progress-container hidden">
+            <div class="progress-bar-header">
+                <span id="progress-label">⚡ 부하 테스트 진행 중...</span>
+                <span id="progress-text">0.0s / 0s (0%)</span>
+            </div>
+            <div class="progress-bar-track">
+                <div id="progress-bar-fill" class="progress-bar-fill"></div>
+            </div>
+        </div>
+
     
         <div class="log-container">
 
@@ -134,7 +141,7 @@
 
     </div>
 
-    <script src="main.js?v=2"></script>
+    <script src="main.js?v=4"></script>
 
 </body>
 
