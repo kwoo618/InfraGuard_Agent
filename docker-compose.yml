@@ -51,6 +51,34 @@ services:
     depends_on:
       - prometheus
 
+  # FastAPI 백엔드(+SSE UI). "app" 프로필에서만 뜬다.
+  #   docker compose up -d                     → 인프라만 (백엔드는 호스트에서 uvicorn으로)
+  #   docker compose --profile app up -d --build → 전체 스택 한 방 (localhost:8000)
+  # 백엔드가 부하 테스트(locust)·스케일링(docker compose)을 subprocess로 실행하므로
+  # 호스트 docker 소켓과 repo 루트(compose 파일 포함)를 마운트한다.
+  backend:
+    profiles: ["app"]
+    build:
+      context: ./backend
+    working_dir: /app/backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # 컨테이너 네트워크에서는 localhost가 아니라 서비스 이름으로 접근한다.
+      - PROMETHEUS_URL=http://prometheus:9090
+      - TARGET_SERVER_URL=http://target-server:8080
+      # scale_service의 docker compose가 호스트의 기존 프로젝트를 조종하도록 이름 고정.
+      - COMPOSE_PROJECT_NAME=infraguard_agent
+    volumes:
+      - ./:/app                                   # repo 루트(코드 + docker-compose.yml)
+      - //var/run/docker.sock:/var/run/docker.sock  # docker-out-of-docker
+    depends_on:
+      - prometheus
+      - target-server
+
 networks:
   default:
     name: infraguard-network
