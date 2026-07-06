@@ -12,3 +12,4 @@ docker>=7.0
 langfuse>=2.0
 pytest>=8.0
 pytest-asyncio>=0.23
+locust>=2.20
