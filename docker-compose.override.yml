@@ -1,0 +1,12 @@
+# 로컬 개발용 override — compose가 docker-compose.yml에 자동 병합한다.
+#
+# Docker Desktop의 containerd 이미지 스토어(Settings > General > "Use containerd
+# for pulling and storing images")가 켜져 있으면, prom/prometheus의 `USER nobody`
+# 이름 해석에 실패하며 "unable to find user nobody" 에러로 컨테이너가 안 뜬다.
+# nobody의 숫자 UID/GID(65534)를 직접 지정해 이를 우회한다. (모든 플랫폼에서 안전)
+#
+# 참고: 근본 해결은 위 containerd 옵션을 끄는 것이다. 이 override는 그 없이도
+# 동작하게 해주는 보조 장치다.
+services:
+  prometheus:
+    user: "65534:65534"
