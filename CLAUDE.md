@@ -20,6 +20,8 @@ AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 �
 
 ## 커맨드
 
+> **요구사항: Python 3.11+ 필수** — `engine.py`가 `asyncio.timeout`(3.11 신규 API)을 사용한다. 3.10 이하에서는 engine 테스트가 전부 실패한다.
+
 ```bash
 # 의존성 설치
 pip install -r backend/requirements.txt

@@ -86,34 +86,71 @@ InfraGuard_Agent
 
 ### 사전 요구사항
 
-- Python 3.11+
-- Docker & Docker Compose
-- Upstage API Key (Solar Pro)
+- **Python 3.11 이상** (필수 — `engine.py`가 3.11 신규 API `asyncio.timeout`을 사용. 3.10 이하에서는 engine 테스트가 전부 실패한다)
+- **Docker Desktop** (설치 후 실행 중이어야 함)
+- **Upstage API Key** (Solar Pro)
 
-### 설치
-
-```bash
-git clone https://github.com/jogeulling/UpStage_Project.git
-cd UpStage_Project
-
-pip install -r backend/requirements.txt
-
-cp .env.example .env
-# .env에 UPSTAGE_API_KEY 입력
-```
-
-### 실행
+### 1. 코드 내려받기 & API 키 설정
 
 ```bash
-# 인프라 구동 (대상 서버 + Prometheus + Grafana)
-docker compose up -d
+git clone https://github.com/kwoo618/InfraGuard_Agent.git
+cd InfraGuard_Agent
 
-# 백엔드 서버 시작
-cd backend && uvicorn app.main:app --reload --port 8000
-
-# 브라우저에서 접속
-open http://localhost:8000
+cp .env.example .env        # Windows: copy .env.example .env
+# .env 파일을 열어 UPSTAGE_API_KEY=<발급받은_키> 입력
 ```
+
+### 2. 파이썬 가상환경 + 의존성 설치
+
+```bash
+py -3.11 -m venv .venv          # Windows
+# python3.11 -m venv .venv      # macOS/Linux
+
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS/Linux
+
+pip install -r backend/requirements.txt   # locust 포함
+```
+
+### 3. 인프라 컨테이너 기동
+
+```bash
+docker compose up -d --build    # target-server, prometheus, grafana 등
+```
+
+### 4. 백엔드 서버 실행
+
+```bash
+cd backend
+uvicorn app.main:app --port 8000
+```
+
+> 반드시 `backend/` 디렉터리에서 실행한다(정적 파일 경로 때문). 가상환경을 activate한 상태여야 부하 테스트 시 `locust`가 subprocess에서 잡힌다.
+
+### 5. 브라우저 접속
+
+```
+http://localhost:8000
+```
+
+---
+
+## 웹에서 사용하기
+
+1. **목표 TPS**(부하 세기, 최대 50)와 **테스트 시간(초)** 을 입력하고 **[진단 시작]** 클릭
+2. 부하 테스트 → 메트릭 수집 → AI 병목 진단 로그가 실시간(SSE)으로 흐른다
+3. 병목이 감지되면 **승인 모달**이 뜬다 → **[승인]** 시 실제 스케일링 실행
+4. 스케일링 후 재검증 → **전/후 성능 비교 리포트**까지 확인
+
+> **입력값 이해** — "목표 TPS"는 실제 처리량이 아니라 **동시 가상 사용자 수**를 정하는 값이다. 결과로 나오는 TPS는 서버가 실제로 처리한 초당 요청 수(측정값)이며, 보통 입력값과 다르다. 병목을 제대로 관찰하려면 부하를 높이고(예: 40~50) 시간을 충분히(예: 20~30초) 준다.
+
+---
+
+## 문제 해결 (Windows)
+
+- **`locust`를 찾을 수 없음 / 부하 테스트 실패(WinError 2)** — 가상환경을 activate한 뒤 서버를 실행하거나, `.venv\Scripts`가 PATH에 있는지 확인한다.
+- **Prometheus가 `unable to find user nobody` 또는 `exec format error`로 안 뜸** — Docker Desktop **Settings > General > "Use containerd for pulling and storing images"** 를 끄고 재시작한다. 동봉된 `docker-compose.override.yml`이 이를 우회하도록 돕는다. 그래도 안 되면 `docker rmi -f prom/prometheus:latest` 후 `docker compose up -d`로 이미지를 다시 받는다.
+- **engine 관련 테스트가 대량으로 실패** — `python --version`으로 3.11 이상인지 확인한다.
 
 ---
 
