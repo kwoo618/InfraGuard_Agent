@@ -23,7 +23,99 @@ const steps = [
 let currentTaskId = null;
 let eventSource = null;
 
+// 부하 테스트 프로그레스 바 타이머
+let loadTestTimer = null;
+let loadTestDuration = 0;
+let loadTestElapsed = 0;
 
+function stopLoadTestTimer() {
+    if (loadTestTimer) {
+        clearInterval(loadTestTimer);
+        loadTestTimer = null;
+    }
+}
+
+function updateLoadTestProgressUI() {
+    const total = Math.max(loadTestDuration, 1);
+    const elapsed = Math.min(loadTestElapsed, total);
+    const pct = Math.min((elapsed / total) * 100, 100);
+    const fill = document.getElementById('progress-bar-fill');
+    const text = document.getElementById('progress-text');
+    if (fill) fill.style.width = `${pct}%`;
+    if (text) text.innerText = `${elapsed.toFixed(1)}s / ${total}s (${pct.toFixed(0)}%)`;
+}
+
+function setLoadTestProgressCompleteStyle(isComplete) {
+    const fill = document.getElementById('progress-bar-fill');
+    if (fill) fill.classList.toggle('is-complete', isComplete);
+}
+
+function resetLoadTestProgress() {
+    stopLoadTestTimer();
+    loadTestDuration = 0;
+    loadTestElapsed = 0;
+    setLoadTestProgressCompleteStyle(false);
+    const container = document.getElementById('load-test-progress-container');
+    const fill = document.getElementById('progress-bar-fill');
+    const text = document.getElementById('progress-text');
+    if (container) container.classList.add('hidden');
+    if (fill) fill.style.width = '0%';
+    if (text) text.innerText = '0.0s / 0s (0%)';
+}
+
+function startLoadTestProgress(totalSeconds, sourceMessage) {
+    stopLoadTestTimer();
+    setLoadTestProgressCompleteStyle(false);
+    loadTestDuration = Math.max(parseInt(totalSeconds, 10) || 1, 1);
+    loadTestElapsed = 0;
+    const container = document.getElementById('load-test-progress-container');
+    const label = document.getElementById('progress-label');
+    if (container) container.classList.remove('hidden');
+    if (label) {
+        label.textContent = sourceMessage || `⚡ 부하 테스트 진행 중... (${loadTestDuration}초)`;
+    }
+    updateLoadTestProgressUI();
+    loadTestTimer = setInterval(() => {
+        loadTestElapsed += 0.1;
+        if (loadTestElapsed >= loadTestDuration) {
+            loadTestElapsed = loadTestDuration;
+            stopLoadTestTimer();
+        }
+        updateLoadTestProgressUI();
+    }, 100);
+}
+
+function completeLoadTestProgress() {
+    stopLoadTestTimer();
+    if (loadTestDuration > 0) {
+        loadTestElapsed = loadTestDuration;
+    }
+    const fill = document.getElementById('progress-bar-fill');
+    const text = document.getElementById('progress-text');
+    if (fill) fill.style.width = '100%';
+    setLoadTestProgressCompleteStyle(true);
+    if (text && loadTestDuration > 0) {
+        text.innerText = `${loadTestDuration.toFixed(1)}s / ${loadTestDuration}s (100%)`;
+    }
+}
+
+function hideLoadTestProgress() {
+    stopLoadTestTimer();
+    const container = document.getElementById('load-test-progress-container');
+    if (container) container.classList.add('hidden');
+}
+
+/** SSE "⚡ 부하 테스트 진행 중... (N초)" 메시지에서 N(초) 추출 */
+function parseLoadTestDurationSeconds(message) {
+    if (!message) return null;
+
+    const text = String(message);
+    const match = text.match(/부하\s*테스트\s*진행\s*중[^)]*\(\s*(\d+)\s*초\s*\)/u);
+    if (!match) return null;
+
+    const seconds = parseInt(match[1], 10);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
 
 function appendLog(message, type = 'info') {
 
@@ -170,6 +262,7 @@ startBtn.addEventListener('click', () => {
     logWindow.innerHTML = "";
 
     resetProgress();
+    resetLoadTestProgress();
 
     appendLog('자율 진단 시스템 가동 요청 중...', 'system');
 
@@ -219,21 +312,37 @@ startBtn.addEventListener('click', () => {
 
         if (data.status === 'running') {
             if (!currentTaskId && data.task_id) {
-                currentTaskId = data.task_id;   // 이 진단 흐름의 실제 task_id를 여기서 확정
+                currentTaskId = data.task_id;
             }
             appendLog(data.message, 'info');
-            completeStep("step-load");
-            activateStep("step-metric");
         }
 
         else if (data.status === 'analyzing') {
             appendLog(data.message, 'info');
-            completeStep("step-metric");
-            activateStep("step-ai");
+            const msg = data.message || '';
+
+            if (msg.includes('부하 테스트') && msg.includes('진행 중')) {
+                const seconds = parseLoadTestDurationSeconds(msg);
+                if (seconds !== null) {
+                    activateStep('step-load');
+                    startLoadTestProgress(seconds, msg);
+                } else {
+                    console.warn('[load-test] SSE duration 파싱 실패:', msg);
+                }
+            } else if (msg.includes('부하 테스트 완료')) {
+                completeLoadTestProgress();
+                completeStep('step-load');
+                activateStep('step-metric');
+            } else if (msg.includes('AI 분석 완료')) {
+                hideLoadTestProgress();
+                completeStep('step-metric');
+                activateStep('step-ai');
+            }
         }
-        
-        // 에러 상태 분기 추가
+
         else if (data.status === 'error') {
+            hideLoadTestProgress();
+
             appendLog(data.message, 'error');
             updateStatus("🔴 ERROR", "error");
             eventSource.close();
@@ -282,6 +391,8 @@ startBtn.addEventListener('click', () => {
         // agent.py가 보내는 모든 실패 케이스(인프라 다운, 부하테스트 실패,
         // 승인 거절, scale_service 실패)는 status: 'failed'로 통일되어 온다.
         else if (data.status === 'failed') {
+            hideLoadTestProgress();
+
             appendLog(data.message, 'error');
             updateStatus("🔴 ERROR", "error");
             approvalModal.classList.add("hidden");
@@ -294,6 +405,8 @@ startBtn.addEventListener('click', () => {
     };
 
     eventSource.onerror = function () {
+        hideLoadTestProgress();
+
         // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
         if (eventSource.readyState !== EventSource.CLOSED) {
             appendLog("[에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! docker compose up -d를 확인하세요.", "error");
