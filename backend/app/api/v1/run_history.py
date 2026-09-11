@@ -23,6 +23,7 @@ engine은 상태 dict를 제자리에서 갱신하고, 새 측정·진단·스�
 """
 
 import ast
+import asyncio
 import copy
 import json
 import logging
@@ -365,6 +366,13 @@ class RunRecorder:
         self._revalidations: list[dict[str, Any]] = []
         self._pending_revalidations: list[str] = []
 
+        # 결과 패널 그래프용 부하 테스트 추가 데이터 (docs/03 Phase 4 그래프).
+        # 항목: {"result": LoadTestResult, "details": {...}, "record": 측정 레코드 dict 또는 None}
+        # LoadTestResult 객체 identity로 측정 레코드와 연결한다
+        self._load_test_details: list[dict[str, Any]] = []
+        # 늦게 끝나는 수집 task (서버별 요청 수). settle()에서 기다린다
+        self._pending_tasks: set[asyncio.Task] = set()
+
         # identity 비교용: 직전에 기록한 객체
         self._last_load_test: LoadTestResult | None = None
         self._last_metrics: SystemMetrics | None = None
@@ -546,6 +554,81 @@ class RunRecorder:
         except Exception:
             logger.exception("재검증 응답 기록 실패 task_id=%s", self.task_id)
 
+    # ---- 결과 패널 그래프용 데이터 (docs/03 Phase 4 그래프) ----
+
+    def attach_load_test_details(
+        self,
+        result: LoadTestResult,
+        details: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """
+        같은 부하 테스트(LoadTestResult 객체)의 그래프용 추가 데이터(timeseries, endpoints)를 붙인다.
+
+        observe()에서 이 결과로 측정 레코드를 만들 때 함께 저장된다.
+        반환값은 늦게 오는 값(set_instance_requests)을 붙일 때 쓰는 핸들이다.
+        """
+
+        entry: dict[str, Any] = {"result": result, "details": {}, "record": None}
+
+        try:
+            entry["details"] = dict(details or {})
+            self._load_test_details.append(entry)
+        except Exception:
+            logger.exception("그래프 데이터 연결 실패 task_id=%s", self.task_id)
+
+        return entry
+
+    def set_instance_requests(
+        self,
+        entry: dict[str, Any],
+        value: dict[str, Any] | None,
+    ) -> None:
+        """부하 뒤 늦게 수집한 서버별 요청 수를 붙인다. 측정 레코드가 이미 있으면 레코드도 갱신한다."""
+
+        try:
+            entry["details"]["requests_by_instance"] = value
+
+            if entry["record"] is not None:
+                entry["record"]["requests_by_instance"] = value
+        except Exception:
+            logger.exception("서버별 요청 수 기록 실패 task_id=%s", self.task_id)
+
+    def track(self, task: asyncio.Task) -> None:
+        """늦게 끝나는 수집 task를 등록한다. settle()이 기다리고 finalize()가 남은 것을 취소한다."""
+
+        try:
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+        except Exception:
+            logger.exception("수집 task 등록 실패 task_id=%s", self.task_id)
+
+    async def settle(self, timeout: float) -> None:
+        """
+        남은 수집 task를 최대 timeout초 기다린다.
+
+        시간 안에 끝나지 않으면 취소하고 그 값은 null로 둔다 (추정값을 넣지 않는다). 예외를 던지지 않는다.
+        """
+
+        try:
+            pending = [task for task in self._pending_tasks if not task.done()]
+
+            if not pending:
+                return
+
+            _, not_done = await asyncio.wait(pending, timeout=timeout)
+
+            for task in not_done:
+                task.cancel()
+
+            if not_done:
+                logger.warning(
+                    "그래프 데이터 수집이 %s초 안에 끝나지 않아 null로 저장한다 task_id=%s",
+                    timeout,
+                    self.task_id,
+                )
+        except Exception:
+            logger.exception("그래프 데이터 대기 실패 task_id=%s", self.task_id)
+
     def observe(self, state: AgentRuntimeState) -> None:
         """engine 호출이 끝난 상태에서 새로 생긴 스케일링·측정·재검증·진단 결과를 누적한다."""
 
@@ -641,7 +724,14 @@ class RunRecorder:
         result: LoadTestResult,
         metrics: SystemMetrics | None,
     ) -> dict[str, Any]:
-        return {
+        # 같은 부하 테스트 객체에 붙은 그래프용 데이터 (없으면 세 필드 모두 null)
+        entry = next(
+            (item for item in self._load_test_details if item["result"] is result),
+            None,
+        )
+        details = entry["details"] if entry is not None else {}
+
+        record = {
             "round": len(self._history) + 1,
             # engine은 최초 진단 뒤에는 스케일링 후에만 다시 측정한다
             "phase": "initial" if not self._history else "after_scaling",
@@ -672,7 +762,18 @@ class RunRecorder:
                 if metrics is not None
                 else None
             ),
+            # 결과 패널 그래프용 (docs/03 Phase 4 그래프). 수집하지 못했으면 null.
+            # 이 기능 이전 결과 파일에는 이 필드들이 없다
+            "timeseries": details.get("timeseries"),
+            "endpoints": details.get("endpoints"),
+            # 부하 뒤 늦게 도착하면 set_instance_requests()가 채운다
+            "requests_by_instance": details.get("requests_by_instance"),
         }
+
+        if entry is not None:
+            entry["record"] = record
+
+        return record
 
     def _revalidation_record(self, content: str) -> dict[str, Any]:
         round_number = self._latest_round()
@@ -750,6 +851,10 @@ class RunRecorder:
 
         self._finalized = True
         self.end_reason = end_reason
+
+        # 기다리지 않은 수집 task(스트림 종료 경로 등)는 취소한다. 그 값은 null로 저장된다
+        for task in list(self._pending_tasks):
+            task.cancel()
 
         try:
             self._observe(state)

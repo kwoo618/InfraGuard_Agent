@@ -37,6 +37,7 @@ from app.schemas import (
     ScalingResult,
     SystemMetrics,
 )
+from app.tools.run_load_test import LoadTestError
 
 # agent.httpx.AsyncClient를 바꾸면 httpx 모듈 전체가 바뀌므로 원본을 먼저 잡아 둔다.
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -180,7 +181,8 @@ def _fake_diagnosis(
     fail_before_load: bool = False,
     fail_after_load: bool = False,
 ):
-    async def fake_run_diagnosis(state):
+    # agent.py는 부하 테스트 수집용 load_test_node를 kwargs로 넘긴다. 이 가짜는 부하 테스트를 흉내만 내므로 쓰지 않는다
+    async def fake_run_diagnosis(state, **kwargs):
         if fail_before_load:
             state.update(
                 agent_outcome="failed",
@@ -991,3 +993,223 @@ def test_approve_endpoint_returns_400_over_http():
         assert not task_manager.futures[task_id].done()
     finally:
         loop.close()
+
+
+# ----------------------------------------------------------------------
+# 결과 패널 그래프용 데이터 (docs/03 Phase 4 그래프)
+# 초 단위 시계열·엔드포인트 통계(부하 테스트와 함께)와 서버별 요청 수(부하 뒤 백그라운드).
+# 아래 값은 테스트 입력값이며 측정값이 아니다.
+# ----------------------------------------------------------------------
+
+GRAPH_DETAILS = {
+    "timeseries": {
+        "bucket_sec": 1,
+        "source": "locust_request_log",
+        "percentile": "nearest_rank_p95",
+        "points": [{"t": 0, "requests": 40, "failures": 0, "p95_ms": 2900.0}],
+    },
+    "endpoints": [
+        {
+            "name": "/heavy",
+            "method": "GET",
+            "requests": 120,
+            "failures": 0,
+            "error_rate": 0.0,
+            "p95_ms": 4100.0,
+            "avg_ms": 1500.0,
+            "rps": 12.0,
+        }
+    ],
+}
+
+INSTANCE_BEFORE = {"172.18.0.3:8080": 1000.0}
+INSTANCE_AFTER = {"172.18.0.3:8080": 1420.0}
+
+
+def _fake_diagnosis_using_load_node(requires_scaling: bool = False):
+    """agent.py가 넘긴 load_test_node(그래프 데이터 수집 노드)를 engine처럼 호출하는 가짜 진단."""
+
+    async def fake_run_diagnosis(state, load_test_node=None, **kwargs):
+        state.update(await load_test_node(state))
+
+        if state["agent_outcome"] == "failed":
+            return state
+
+        state["system_metrics"] = _metrics(40)
+        state["bottleneck_report"] = _report(requires_scaling)
+        state["loop_count"] += 1
+        state.update(agent_outcome="diagnosed", final_answer="진단 완료: 병목 없음")
+        return state
+
+    return fake_run_diagnosis
+
+
+@pytest.fixture
+def fake_load_test(monkeypatch):
+    """run_load_test_detailed와 인스턴스별 요청 카운터(부하 전 → 부하 후 순서)를 가짜로 둔다."""
+
+    snapshots = [dict(INSTANCE_BEFORE), dict(INSTANCE_AFTER)]
+
+    def fake_detailed(target_tps, duration):
+        return _load_result(50.0, 3000.0), json.loads(json.dumps(GRAPH_DETAILS))
+
+    async def fake_counts():
+        return snapshots.pop(0) if snapshots else None
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", fake_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", fake_counts)
+    monkeypatch.setattr(agent, "INSTANCE_SNAPSHOT_DELAY_SEC", 0.0)
+    return snapshots
+
+
+def test_measurement_record_without_details_has_null_graph_fields():
+    """그래프 데이터가 붙지 않은 측정(예: 가짜 부하 테스트)은 세 필드가 null이다."""
+
+    recorder = _recorder()
+    recorder.observe(_state_with(_load_result(50.0, 3000.0), _metrics(40), _report(False)))
+
+    [record] = recorder.measurement_history
+
+    assert record["timeseries"] is None
+    assert record["endpoints"] is None
+    assert record["requests_by_instance"] is None
+
+
+def test_late_instance_requests_update_existing_record():
+    """서버별 요청 수는 측정 레코드가 만들어진 뒤에 도착해도 그 레코드에 붙는다."""
+
+    recorder = _recorder()
+    load = _load_result(50.0, 3000.0)
+    entry = recorder.attach_load_test_details(load, json.loads(json.dumps(GRAPH_DETAILS)))
+
+    recorder.observe(_state_with(load, _metrics(40), _report(False)))
+
+    [record] = recorder.measurement_history
+
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["endpoints"] == GRAPH_DETAILS["endpoints"]
+    assert record["requests_by_instance"] is None
+
+    recorder.set_instance_requests(entry, {"counts": {"172.18.0.3:8080": 420}})
+
+    assert recorder.measurement_history[0]["requests_by_instance"] == {
+        "counts": {"172.18.0.3:8080": 420}
+    }
+
+
+async def test_stream_saves_graph_data_with_measurement(
+    results_dir,
+    fake_infra,
+    fake_load_test,
+    monkeypatch,
+):
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [record] = data["measurement_history"]
+
+    # LoadTestResult 값은 그대로다
+    assert record["tps"] == 50.0
+    assert record["latency_p95"] == 3000.0
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["endpoints"] == GRAPH_DETAILS["endpoints"]
+    assert record["requests_by_instance"] == {
+        "handlers": ["/light", "/heavy", "/flaky"],
+        "excluded": ["/health", "/metrics"],
+        "counts": {"172.18.0.3:8080": 420},
+    }
+
+    await _assert_report_matches_file(data)
+
+
+async def test_stream_saves_null_when_instance_snapshot_is_late(
+    results_dir,
+    fake_infra,
+    fake_load_test,
+    monkeypatch,
+):
+    """부하 뒤 서버별 조회가 기다리는 시간보다 늦으면 null로 저장하고 흐름은 끝까지 간다."""
+
+    calls = []
+
+    async def slow_after_counts():
+        calls.append(1)
+        if len(calls) == 1:
+            return dict(INSTANCE_BEFORE)
+        await asyncio.sleep(5)
+        return dict(INSTANCE_AFTER)
+
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", slow_after_counts)
+    monkeypatch.setattr(agent, "DETAILS_SETTLE_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    [record] = _only_result_file(results_dir)["measurement_history"]
+
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["requests_by_instance"] is None
+
+
+async def test_stream_continues_when_graph_collection_fails(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    """Prometheus 조회가 예외를 던지고 Locust 추가 데이터가 없어도 부하 테스트 결과와 흐름은 그대로다."""
+
+    def fake_detailed(target_tps, duration):
+        return _load_result(50.0, 3000.0), {"timeseries": None, "endpoints": None}
+
+    async def broken_counts():
+        raise RuntimeError("prometheus down")
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", fake_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", broken_counts)
+    monkeypatch.setattr(agent, "INSTANCE_SNAPSHOT_DELAY_SEC", 0.0)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    [record] = _only_result_file(results_dir)["measurement_history"]
+
+    assert record["tps"] == 50.0
+    assert record["timeseries"] is None
+    assert record["endpoints"] is None
+    assert record["requests_by_instance"] is None
+
+
+async def test_stream_load_test_failure_through_capture_node(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    """수집 노드를 거쳐도 Locust 실패는 기존과 같이 실패 경로로 끝난다."""
+
+    def failing_detailed(target_tps, duration):
+        raise LoadTestError("Locust 결과 파일을 찾을 수 없습니다")
+
+    async def counts():
+        return {}
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", failing_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", counts)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "failed"
+
+    data = _only_result_file(results_dir)
+
+    assert data["measurement_history"] == []
+    assert data["outcome"]["end_reason"] == "failed"
+    assert "부하 테스트 실행 실패" in data["outcome"]["error"]

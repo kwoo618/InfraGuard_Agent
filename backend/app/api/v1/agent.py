@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import time
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -8,9 +10,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent.engine import resume_after_approval, run_diagnosis
-from app.agent.nodes import call_solar_api
+from app.agent.nodes import call_solar_api, run_load_test_node
 from app.agent.state import AgentRuntimeState, create_initial_state
 from app.api.v1.run_history import RunRecorder
+from app.tools.get_metrics import (
+    EXCLUDED_HANDLERS,
+    LOAD_HANDLERS,
+    get_request_counts_by_instance,
+    instance_request_deltas,
+)
+from app.tools.run_load_test import run_load_test_detailed
 from app.tools.scale_service import get_current_replicas, scale_service
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
@@ -39,6 +48,13 @@ run_records: dict[str, RunRecorder] = {}
 # 사용자가 낮은 신뢰도를 확인해야 승인할 수 있다 (#83, docs/02 ISSUE-13).
 # 가드레일 값이라 환경변수로 두지 않는다. 기준값과 같은 0.6은 게이트 대상이 아니다.
 LOW_CONFIDENCE_THRESHOLD = 0.6
+
+# 결과 패널 그래프(서버별 요청 분산, docs/03 Phase 4): 부하가 끝난 뒤 Prometheus가 한 번 더
+# 수집할 때까지 기다렸다가 인스턴스별 요청 카운터를 읽는다 (scrape 5초 + 여유 2초, infra/prometheus/prometheus.yml).
+INSTANCE_SNAPSHOT_DELAY_SEC = 7.0
+
+# 종료 SSE를 보내기 전에 늦게 오는 그래프 데이터를 기다리는 최대 시간(초). 넘으면 null로 저장한다
+DETAILS_SETTLE_TIMEOUT_SEC = 10.0
 
 
 def _is_low_confidence(state: AgentRuntimeState) -> bool:
@@ -86,6 +102,64 @@ async def _read_replicas() -> int:
     except Exception as exc:
         print(f"[run_history] replica 조회 실패: {exc}")
         return 0
+
+
+async def _read_instance_counts() -> dict[str, float] | None:
+    """인스턴스별 요청 카운터. 어떤 실패도 None으로 바꿔 부하 테스트 흐름에 영향을 주지 않는다."""
+    try:
+        return await get_request_counts_by_instance()
+    except Exception as exc:
+        print(f"[run_history] 서버별 요청 카운터 조회 실패: {exc}")
+        return None
+
+
+async def _collect_instance_requests(
+    recorder: RunRecorder,
+    entry: dict[str, Any],
+    before: dict[str, float] | None,
+    load_ended_at: float,
+) -> None:
+    """
+    부하가 끝나고 INSTANCE_SNAPSHOT_DELAY_SEC 뒤에 인스턴스별 요청 카운터를 다시 읽어
+    부하 전후 차이(서버별 부하 요청 수)를 기록한다. 백그라운드 task로 돈다.
+    실패하면 requests_by_instance는 null로 남는다 (에이전트 흐름과 무관).
+    """
+    try:
+        wait = INSTANCE_SNAPSHOT_DELAY_SEC - (time.monotonic() - load_ended_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        after = await _read_instance_counts()
+        counts = instance_request_deltas(before, after)
+
+        if counts is None:
+            return
+
+        recorder.set_instance_requests(entry, {
+            "handlers": list(LOAD_HANDLERS),
+            "excluded": list(EXCLUDED_HANDLERS),
+            "counts": counts,
+        })
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[run_history] 서버별 요청 수 기록 실패: {exc}")
+
+
+async def _finalize(
+    recorder: RunRecorder,
+    state: AgentRuntimeState,
+    end_reason: str,
+    message: str | None = None,
+):
+    """
+    늦게 오는 그래프 데이터(서버별 요청 수)를 최대 DETAILS_SETTLE_TIMEOUT_SEC 기다린 뒤 결과 파일을 저장한다.
+
+    대기는 마지막 부하가 끝나고 INSTANCE_SNAPSHOT_DELAY_SEC가 안 지났을 때만 생긴다.
+    보통은 LLM 호출 시간 동안 이미 끝나 있다.
+    """
+    await recorder.settle(DETAILS_SETTLE_TIMEOUT_SEC)
+    return recorder.finalize(state, end_reason, message)
 
 
 # =================================================================
@@ -302,6 +376,7 @@ async def get_report(task_id: str):
 
     Phase 4(#75)에서 추가한 필드 (UI 결과 패널용, 결과 파일과 같은 값):
     conditions, end_reason, user_decision, diagnoses, approvals, scaling_results, revalidations.
+    measurement_history 레코드에는 결과 패널 그래프용 timeseries, endpoints, requests_by_instance가 붙는다.
     기존 필드는 삭제·이름 변경하지 않는다.
     """
     state = task_manager.states.get(task_id)
@@ -441,6 +516,10 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
     UI가 종료 이벤트를 받자마자 /report를 조회하므로 저장이 먼저 끝나야 한다.
     이 경로를 거치지 못한 종료(클라이언트 연결 종료 등)는 finally에서 stream_closed로 저장한다.
     저장 실패는 로그만 남기고 흐름을 멈추지 않는다.
+
+    결과 패널 그래프 (docs/03 Phase 4): 부하 테스트 노드를 수집용 노드로 바꿔 넘긴다(engine의 load_test_node 인자).
+    초 단위 시계열·엔드포인트 통계는 부하 테스트와 함께, 서버별 요청 수는 부하 뒤 백그라운드로 모은다.
+    종료 SSE 직전에 늦게 오는 값을 최대 DETAILS_SETTLE_TIMEOUT_SEC 기다린다(_finalize).
     """
 
     # 1. AgentRuntimeState 데이터 초기화
@@ -468,6 +547,35 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         recorder.capture_revalidation(content)
         return content
 
+    # 결과 패널 그래프용 데이터를 함께 모으는 부하 테스트 노드 (docs/03 Phase 4 그래프).
+    # engine 기본 노드(nodes.run_load_test_node)를 그대로 호출하고 Locust 실행 함수만 바꾼다.
+    # Locust 명령과 반환하는 update는 기본 노드와 같다. 추가 수집이 실패해도 부하 테스트 결과와 흐름에는 영향이 없다.
+    async def _capture_load_test(node_state: AgentRuntimeState) -> dict[str, Any]:
+        before = await _read_instance_counts()
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs):
+            result, details = run_load_test_detailed(**kwargs)
+            captured["result"] = result
+            captured["details"] = details
+            return result
+
+        update = await run_load_test_node(node_state, load_test_runner=_runner)
+        load_ended_at = time.monotonic()
+
+        try:
+            result = update.get("load_test_result")
+
+            if result is not None and captured.get("result") is result:
+                entry = recorder.attach_load_test_details(result, captured.get("details"))
+                recorder.track(asyncio.create_task(
+                    _collect_instance_requests(recorder, entry, before, load_ended_at)
+                ))
+        except Exception as exc:
+            print(f"[run_history] 그래프 데이터 연결 실패: {exc}")
+
+        return update
+
     try:
         # =================================================================
         # [1단계: 인프라 헬스체크]
@@ -480,12 +588,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 response = await client.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/", timeout=3.0)
                 if response.status_code not in [200, 302]:
                     message = f"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})"
-                    recorder.finalize(state, "failed", message)
+                    await _finalize(recorder, state, "failed", message)
                     yield _sse("failed", task_id, message)
                     return
             except (httpx.ConnectError, httpx.TimeoutException):
                 message = "❌ 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요."
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
@@ -502,12 +610,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         # =================================================================
         yield _sse("analyzing", task_id, f"⚡ 부하 테스트 진행 중... ({duration}초)")
 
-        state = await run_diagnosis(state)
+        state = await run_diagnosis(state, load_test_node=_capture_load_test)
         recorder.observe(state)
 
         if state["agent_outcome"] == "failed":
             message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
-            recorder.finalize(state, "failed", message)
+            await _finalize(recorder, state, "failed", message)
             yield _sse("failed", task_id, message)
             return
 
@@ -576,20 +684,20 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 end_reason = (
                     "no_further_scaling" if recorder.scaling_performed else "no_scaling_proposed"
                 )
-                recorder.finalize(state, end_reason, message)
+                await _finalize(recorder, state, end_reason, message)
                 yield _sse("done", task_id, message)
                 return
 
             if outcome == "failed":
                 message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
             if outcome != "awaiting_approval":
                 # 예상 못한 상태값에 대한 방어 (engine/nodes 계약이 바뀌었을 가능성)
                 message = f"❌ 알 수 없는 진단 상태입니다: {outcome}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
@@ -632,19 +740,20 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 state,
                 approved,
                 revalidation_caller=_capture_revalidation,
+                load_test_node=_capture_load_test,
             )
             recorder.observe(state)
 
             if not approved:
                 message = state.get("final_answer") or "서버 증설이 거부되었습니다."
                 message = f"❌ {message}"
-                recorder.finalize(state, "rejected", message)
+                await _finalize(recorder, state, "rejected", message)
                 yield _sse("failed", task_id, message)
                 return
 
             if state["agent_outcome"] == "failed":
                 message = f"❌ {state.get('error') or '스케일링에 실패했습니다.'}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
@@ -662,7 +771,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
             if state["agent_outcome"] == "scaled":
                 summary = state.get("final_answer") or "스케일링 후 성능이 개선됐습니다."
                 message = f"✅ {summary}"
-                recorder.finalize(state, "scaled", message)
+                await _finalize(recorder, state, "scaled", message)
                 yield _sse("done", task_id, message)
                 return
 
@@ -671,11 +780,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
             continue
 
     except Exception as exc:
-        # 예상 못한 예외도 실행 기록으로 남긴 뒤 원래대로 전파한다.
+        # 예상 못한 예외도 실행 기록으로 남긴 뒤 원래대로 전파한다 (그래프 데이터는 기다리지 않는다).
         recorder.finalize(state, "failed", f"스트림 처리 중 예외: {exc}")
         raise
 
     finally:
         # 정상 종료 경로는 이미 저장했다(finalize는 멱등). 종료 경로를 거치지 못한 실행
         # (승인 대기·진단 중 클라이언트 연결 종료로 스트림이 닫힌 경우 등)도 결과 파일로 남긴다.
+        # 연결이 끊긴 경우라 늦게 오는 그래프 데이터는 기다리지 않는다.
         recorder.finalize(state, "stream_closed")
