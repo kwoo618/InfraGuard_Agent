@@ -986,3 +986,55 @@ button:active{
     cursor: not-allowed;
     transform: none;
 }
+
+/* ================= 부하 중 그래프 (docs/03 Phase 4 그래프) ================= */
+/* 라운드별 색. 선·점·막대·범례가 같은 클래스를 쓴다 */
+.series-0 { --series-color: #f0883e; }
+.series-1 { --series-color: #58a6ff; }
+.series-2 { --series-color: #a371f7; }
+.series-3 { --series-color: #3fb950; }
+.series-4 { --series-color: #db61a2; }
+
+.chart-stack {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.chart-line {
+    fill: none;
+    stroke: var(--series-color);
+    stroke-width: 2;
+}
+
+.chart-dot                  { fill: var(--series-color); }
+.chart-bar[class*="series-"] { fill: var(--series-color); }
+.chart-bar.bar-err          { fill: #d29922; }
+
+.chart-grid       { stroke: #21262d; stroke-width: 1; }
+.chart-axis-label { fill: #8b949e; font-size: 11px; }
+.chart-value-small { fill: #e6edf3; font-size: 10px; font-weight: 700; }
+
+.chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.legend-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    background: var(--series-color);
+}

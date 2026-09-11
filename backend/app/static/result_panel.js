@@ -759,6 +759,7 @@ function renderResultPanel(report) {
     body.appendChild(buildConditions(report));
     body.appendChild(buildDiagnosisSection(report));
     body.appendChild(buildComparisonSection(report));
+    body.appendChild(buildLoadGraphsSection(report));   // result_charts.js
 
     panel.classList.remove('hidden');
 }
