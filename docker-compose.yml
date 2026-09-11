@@ -4,13 +4,26 @@ services:
       context: ./infra/target-server
     # container_name 제거 — --scale 동작을 위해 필수
     # container_name이 있으면 Docker가 복제를 거부함
-    ports:
-      - "8080-8089:8080"
+    # 호스트 포트를 받지 않는다. 호스트 노출은 nginx(localhost:8080)가 담당하고
+    # nginx가 replica들로 요청을 분산한다 (ISSUE-1). 예전 범위 매핑("8080-8089:8080")은
+    # 재생성 시 8080이 비어 부하 대상이 사라지는 문제가 있었다 (ISSUE-9).
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 5s
       timeout: 3s
       retries: 3
+
+  # target-server replica 앞단 로드밸런서. 부하(Locust)는 localhost:8080 → nginx → replica로 간다.
+  # 스케일 후 새 replica 반영 방식은 infra/nginx/nginx.conf 주석 참고.
+  nginx:
+    image: nginx:1.28-alpine   # upstream `server ... resolve`는 오픈소스 1.27.3+ 필요
+    container_name: infraguard-nginx
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - target-server
 
   prometheus:
     image: prom/prometheus:latest
@@ -28,9 +41,8 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     container_name: infraguard-cadvisor
     ports:
-      # target-server가 --scale 시 호스트 포트 8080-8089를 사용하므로
-      # cAdvisor는 그 범위 밖(8090)으로 옮겨 충돌을 피한다.
-      # (기존 8081은 scale된 target-server replica와 겹쳐 8082로 밀리는 문제 발생)
+      # cAdvisor 웹 UI는 호스트 8090 (8080은 nginx가 사용).
+      # 예전에 target-server 범위 포트(8080-8089)를 피하려고 옮긴 값을 그대로 유지한다.
       - "8090:8080"
     volumes:
       # 윈도우 Docker Desktop 호환 경로
@@ -69,7 +81,8 @@ services:
     environment:
       # 컨테이너 네트워크에서는 localhost가 아니라 서비스 이름으로 접근한다.
       - PROMETHEUS_URL=http://prometheus:9090
-      - TARGET_SERVER_URL=http://target-server:8080
+      # 부하는 nginx(LB)를 거쳐 replica로 분산된다. 호스트 실행(localhost:8080)과 같은 경로.
+      - TARGET_SERVER_URL=http://nginx:8080
       # scale_service의 docker compose가 호스트의 기존 프로젝트를 조종하도록 이름 고정.
       - COMPOSE_PROJECT_NAME=infraguard_agent
     volumes:
@@ -78,6 +91,7 @@ services:
     depends_on:
       - prometheus
       - target-server
+      - nginx
 
 networks:
   default:
