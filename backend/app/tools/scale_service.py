@@ -7,12 +7,15 @@ scale_service — target-server 컨테이너 replica 수를 Docker Compose로 �
 동작 순서:
 1. docker compose ps로 target-server의 현재 replica 수를 센다.
 2. 요청받은 목표 replica가 SCALE_MAX_REPLICAS(가드레일)를 넘지 않는지 확인한다.
-3. docker compose up -d --scale target-server=N 명령으로 실제 스케일링을 실행한다.
+3. docker compose up -d --wait --scale target-server=N --no-recreate target-server 명령으로
+   실제 스케일링을 실행하고, 새 replica가 healthy가 될 때까지 기다린다.
 4. 결과를 ScalingResult(schemas.py)로 포장해 반환한다.
 
 주의:
 - HITL 승인 없이 이 함수가 직접 호출되면 안 된다. 호출 시점 통제는 api 레이어(최소명) 책임.
 - subprocess 명령은 docker-compose.yml이 있는 프로젝트 루트에서 실행되어야 한다.
+- --wait가 실패하면(타임아웃·unhealthy) 컨테이너는 이미 늘었을 수 있지만,
+  다른 명령 실패와 같이 after_replicas=before_replicas인 실패로 보고된다.
 """
 
 import os
@@ -109,8 +112,13 @@ async def scale_service(target_replicas: int) -> ScalingResult:
         result = subprocess.run(
             [
                 "docker", "compose", "up", "-d",
+                # 새 replica가 healthy가 된 뒤 반환한다. 스케일 직후 곧바로 재측정(Locust)이
+                # 시작되므로, 기동 중인 replica가 재측정 초반에 섞이지 않게 한다.
+                "--wait",
                 "--scale", f"{SERVICE_NAME}={target_replicas}",
                 "--no-recreate",
+                # 대상을 target-server로 한정 — --wait가 다른 서비스(cadvisor 등) 상태로 실패하지 않게 한다.
+                SERVICE_NAME,
             ],
             cwd=PROJECT_ROOT,
             capture_output=True,

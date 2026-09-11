@@ -70,6 +70,29 @@ async def test_scale_service_normal():
     assert result.error_message is None
 
 
+@pytest.mark.asyncio
+async def test_scale_service_up_command_waits_for_target_server_only():
+    """
+    docker compose up 명령에 --wait(새 replica healthy까지 대기)와 --no-recreate가 들어가고,
+    대상 서비스가 target-server로 한정된다.
+    """
+    run_results = iter([
+        *_ps_sequence(1),
+        _make_run_result(returncode=0),
+        *_ps_sequence(3),
+    ])
+
+    with patch.object(ss_module.subprocess, "run", side_effect=run_results) as mock_run:
+        await ss_module.scale_service(target_replicas=3)
+
+    up_cmd = mock_run.call_args_list[2].args[0]   # ps 2번 다음이 up 호출
+    assert up_cmd[:4] == ["docker", "compose", "up", "-d"]
+    assert "--wait" in up_cmd
+    assert "--no-recreate" in up_cmd
+    assert f"{ss_module.SERVICE_NAME}=3" in up_cmd
+    assert up_cmd[-1] == ss_module.SERVICE_NAME
+
+
 # ── 테스트 2: 상한 초과 거부 ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

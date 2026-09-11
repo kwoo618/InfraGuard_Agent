@@ -16,7 +16,12 @@ from prometheus_fastapi_instrumentator import Instrumentator
 app = FastAPI(title="InfraGuard Target Server")
 
 # /metrics 엔드포인트 자동 노출 (요청 수, latency 등) — Prometheus가 scrape
-Instrumentator().instrument(app).expose(app)
+# in-progress 게이지는 기본값이 꺼져 있고 기본 이름도 http_requests_inprogress라서,
+# get_metrics.py·Grafana 쿼리가 쓰는 http_requests_in_progress 이름으로 명시해 켠다. (ISSUE-6)
+Instrumentator(
+    should_instrument_requests_inprogress=True,
+    inprogress_name="http_requests_in_progress",
+).instrument(app).expose(app)
 
 # 의도적으로 작은 커넥션 풀 흉내 (semaphore로 동시 처리량 제한)
 CONNECTION_POOL_SIZE = 5

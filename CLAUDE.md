@@ -78,6 +78,8 @@ InfraGuard_Agent
 │   ├── locust
 │   │   ├── locustfile.py          # 이하은 - 부하 시나리오
 │   │   └── locust.conf            # 이하은 - TPS 상한 설정
+│   ├── nginx
+│   │   └── nginx.conf             # 최강우 - target-server 로드밸런서 (localhost:8080)
 │   ├── prometheus
 │   │   └── prometheus.yml         # 최강우
 │   ├── grafana
@@ -231,6 +233,7 @@ TARGET_SERVER_URL=http://localhost:8080
 - 변경 후 반드시 `pytest tests/` 통과 확인.
 
 ### 알려진 이슈
-- prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨 → dns_sd_configs로 교체 필요
+- ~~prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨~~ → **해결됨** (Phase 1, dns_sd_configs 적용. 2026-09-11 replica 3개 모두 UP 확인, docs/02 ISSUE-2)
+- ~~스케일 아웃해도 부하가 replica 1개로만 감 / 재생성 후 호스트 8080이 비어 부하 대상이 사라짐~~ → **해결됨** (Phase 2, nginx 로드밸런서가 호스트 8080 고정, target-server replica는 호스트 포트 없음. 2026-09-11 replica 3개 균등 분산·재생성 후 8080 유지 확인, docs/02 ISSUE-1·9)
 - Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)

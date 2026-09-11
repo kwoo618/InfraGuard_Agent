@@ -25,7 +25,7 @@ cp .env.example .env        # Windows: copy .env.example .env
 
 ## 방법 A — Docker 한 방 (권장)
 
-전체 스택(타겟 서버 · Prometheus · 백엔드 API/UI)을 컨테이너로 한 번에 띄운다.
+전체 스택(타겟 서버 · nginx 로드밸런서 · Prometheus · 백엔드 API/UI)을 컨테이너로 한 번에 띄운다.
 
 ```bash
 docker compose --profile app up -d --build
@@ -52,7 +52,10 @@ docker compose --profile app down
 - 백엔드는 부하 테스트(`locust`)와 스케일링(`docker compose`)을 subprocess로 실행하므로,
   이미지에 docker CLI가 포함되고, 런타임에 **호스트 docker 소켓**과 **repo 루트**를 마운트한다.
 - 컨테이너 네트워크에서는 `localhost` 대신 서비스 이름으로 접근한다:
-  `PROMETHEUS_URL=http://prometheus:9090`, `TARGET_SERVER_URL=http://target-server:8080`.
+  `PROMETHEUS_URL=http://prometheus:9090`, `TARGET_SERVER_URL=http://nginx:8080`.
+- 부하는 nginx 로드밸런서(호스트 `localhost:8080`, 컨테이너 네트워크 `nginx:8080`)를 거쳐
+  target-server replica들로 분산된다. replica는 호스트 포트를 받지 않으므로, 스케일로 컨테이너가
+  재생성돼도 부하 대상 주소는 바뀌지 않는다.
 
 ### ⚠️ 방법 A 사전 조건 (코드 1줄)
 컨테이너 안에서는 `localhost:9090`이 백엔드 자기 자신을 가리키므로, 헬스체크가
@@ -87,5 +90,8 @@ cd backend && uvicorn app.main:app --port 8000
 - **부하 테스트 실패(locust 없음)** → `backend/requirements.txt`에 `locust` 포함 여부 확인.
 - **Prometheus가 `nobody`/`exec format`으로 안 뜸** → `docker-compose.override.yml`이 우회하거나,
   Docker Desktop Settings > General에서 "Use containerd for pulling and storing images"를 끈다.
+- **부하 테스트가 전부 연결 거부(에러율 100%)** → `docker compose ps`로 `infraguard-nginx`가 `8080`을 받고 있는지 확인.
+  로드밸런서 도입 전 설정(target-server 범위 포트)으로 떠 있던 스택이면 호스트에서 `docker compose up -d`로 한 번 재생성한다
+  (스케일링은 `--no-recreate`라 기존 컨테이너 설정을 바꾸지 않는다).
 - **스케일링이 새 프로젝트를 만들며 동작 안 함** → 백엔드 서비스의 `COMPOSE_PROJECT_NAME=infraguard_agent`
   환경변수가 유지되는지 확인(호스트 프로젝트 이름과 일치해야 기존 컨테이너를 조종함).
