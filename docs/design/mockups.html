@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InfraGuard 결과 패널 디자인 시안</title>
+<style>
+  :root { --font: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: var(--font); background: #e9ebee; color: #222; }
+  .switcher { position: sticky; top: 0; z-index: 10; display: flex; gap: 8px; align-items: center;
+    padding: 12px 20px; background: #fff; border-bottom: 1px solid #d5d8dd; }
+  .switcher strong { margin-right: 12px; font-size: 14px; }
+  .switcher button { font: inherit; font-size: 14px; padding: 7px 14px; border: 1px solid #c4c8ce;
+    background: #fff; border-radius: 6px; cursor: pointer; }
+  .switcher button[aria-pressed="true"] { background: #222; color: #fff; border-color: #222; }
+  .switcher button:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+  .note { margin-left: auto; font-size: 12px; color: #666; max-width: 420px; line-height: 1.4; }
+  .stage { padding: 28px 20px 60px; }
+  .design { display: none; margin: 0 auto; }
+  .design.active { display: block; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ───────── A. 관제 콘솔형 ───────── */
+  #A { max-width: 1040px; background: #111217; color: #ccccdc; padding: 18px; border-radius: 4px; }
+  #A .top { display: flex; align-items: baseline; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid #2c3039; }
+  #A h1 { margin: 0; font-size: 17px; font-weight: 600; color: #e4e4ee; }
+  #A .cond { font-size: 12.5px; color: #8e8e9e; }
+  #A .gf { margin-left: auto; font-size: 13px; color: #6e9fff; text-decoration: none; border: 1px solid #2c3039;
+    padding: 6px 10px; border-radius: 3px; }
+  #A .verdict { display: flex; align-items: center; gap: 14px; margin: 16px 0; padding: 14px 16px;
+    background: #181b1f; border-left: 3px solid #73bf69; }
+  #A .verdict b { color: #73bf69; font-size: 15px; }
+  #A .verdict span { font-size: 14px; }
+  #A .flow { display: grid; grid-template-columns: 1fr 150px 1fr 150px 1fr; align-items: stretch; margin-bottom: 16px; }
+  #A .round { background: #181b1f; border: 1px solid #2c3039; padding: 14px; }
+  #A .round .h { font-size: 12.5px; color: #8e8e9e; margin-bottom: 10px; }
+  #A .boxes { display: flex; gap: 4px; height: 18px; margin-bottom: 12px; }
+  #A .boxes i { width: 18px; background: #5794f2; display: block; }
+  #A .p95 { font-size: 26px; font-weight: 600; }
+  #A .p95 small { font-size: 13px; font-weight: 400; margin-left: 2px; }
+  #A .bad { color: #f2495c; } #A .good { color: #73bf69; }
+  #A .sub { font-size: 12.5px; color: #8e8e9e; margin-top: 6px; line-height: 1.5; }
+  #A .step { display: flex; flex-direction: column; justify-content: center; padding: 0 12px; font-size: 12px;
+    color: #8e8e9e; line-height: 1.5; position: relative; }
+  #A .step::before { content: ""; position: absolute; top: 50%; left: 6px; right: 6px; border-top: 1px dashed #464c54; z-index: 0; }
+  #A .step div { background: #111217; position: relative; z-index: 1; padding: 4px 6px; text-align: center; }
+  #A .step em { font-style: normal; color: #ccccdc; }
+  #A .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  #A .panel { background: #181b1f; border: 1px solid #2c3039; padding: 12px 14px 8px; }
+  #A .panel .h { font-size: 13px; color: #ccccdc; margin-bottom: 6px; }
+
+  /* ───────── B. 리포트형 ───────── */
+  #B { max-width: 780px; background: #fff; padding: 48px 56px 56px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  #B .meta { font-size: 13px; color: #6b6f76; margin-bottom: 28px; line-height: 1.6; }
+  #B h1 { margin: 0 0 12px; font-size: 27px; line-height: 1.4; font-weight: 700; color: #111; letter-spacing: -0.01em; }
+  #B .lead { font-size: 16px; line-height: 1.7; color: #3a3d42; margin: 0 0 36px; }
+  #B h2 { font-size: 15px; font-weight: 700; margin: 36px 0 12px; padding-bottom: 8px; border-bottom: 2px solid #111; }
+  #B table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  #B th { text-align: right; font-weight: 600; color: #6b6f76; font-size: 13px; padding: 8px 10px; border-bottom: 1px solid #d9dce0; }
+  #B th:first-child, #B td:first-child { text-align: left; }
+  #B td { text-align: right; padding: 11px 10px; border-bottom: 1px solid #eceef0; }
+  #B .fail { color: #c92a2a; font-weight: 600; } #B .pass { color: #2b8a3e; font-weight: 600; }
+  #B ol { margin: 0; padding-left: 20px; line-height: 1.75; font-size: 15px; color: #2b2e33; }
+  #B ol li { margin-bottom: 10px; }
+  #B ol li span { color: #6b6f76; }
+  #B .limits { font-size: 13px; color: #6b6f76; line-height: 1.7; }
+  #B .gf { color: #1c5fd6; }
+
+  /* ───────── C. 미니멀형 ───────── */
+  #C { max-width: 980px; background: #fafafa; padding: 40px 44px 44px; border: 1px solid #e4e4e7; border-radius: 10px; }
+  #C .row1 { display: flex; align-items: flex-start; gap: 24px; }
+  #C .kicker { font-size: 14px; color: #71717a; margin: 0 0 6px; }
+  #C h1 { margin: 0; font-size: 44px; font-weight: 700; letter-spacing: -0.03em; color: #18181b; line-height: 1.1; }
+  #C h1 .from { color: #b4b4bb; font-weight: 500; }
+  #C .slo { margin-top: 10px; font-size: 15px; color: #3f3f46; }
+  #C .slo b { color: #18181b; }
+  #C .side { margin-left: auto; text-align: right; font-size: 13px; color: #71717a; line-height: 1.7; }
+  #C .side a { color: #18181b; }
+  #C .chart { margin: 28px 0 8px; }
+  #C .stats { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid #e4e4e7; margin-top: 12px; }
+  #C .stat { padding: 18px 0 0; }
+  #C .stat .l { font-size: 13px; color: #71717a; }
+  #C .stat .v { font-size: 21px; font-weight: 600; color: #18181b; margin-top: 4px; }
+  #C .stat .d { font-size: 13px; margin-top: 2px; color: #71717a; }
+  #C .stat .worse { color: #dc4c1f; }
+  #C details { margin-top: 26px; border-top: 1px solid #e4e4e7; padding-top: 14px; font-size: 14px; color: #3f3f46; }
+  #C summary { cursor: pointer; color: #18181b; font-weight: 600; }
+  #C details p { line-height: 1.7; margin: 10px 0 0; }
+
+  @media (max-width: 760px) {
+    #A .flow { grid-template-columns: 1fr; } #A .step { padding: 8px 0; } #A .step::before { display: none; }
+    #A .panels { grid-template-columns: 1fr; }
+    #B { padding: 28px 22px; } #C { padding: 24px; } #C .row1 { flex-direction: column; } #C .side { text-align: left; margin-left: 0; }
+    #C .stats { grid-template-columns: 1fr 1fr; } .note { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="switcher" role="toolbar" aria-label="디자인 시안 선택">
+  <strong>결과 패널 시안</strong>
+  <button type="button" data-t="A" aria-pressed="true">A 관제 콘솔형</button>
+  <button type="button" data-t="B" aria-pressed="false">B 리포트형</button>
+  <button type="button" data-t="C" aria-pressed="false">C 미니멀형</button>
+  <p class="note">수치: 발표용 측정 2회차(00:52:45, 동시 사용자 50명, 30초) UI 로그 값. 시안 비교용이며 부하 중 그래프(초당 시계열, 엔드포인트별, 서버별)는 같은 스타일로 이어진다고 보면 됩니다.</p>
+</div>
+
+<div class="stage">
+
+<!-- A -->
+<section class="design active" id="A" aria-label="관제 콘솔형">
+  <div class="top">
+    <h1>진단 결과</h1>
+    <span class="cond num">동시 사용자 50명, 부하 30초, SLO P95 1000ms</span>
+    <a class="gf" href="#">Grafana에서 보기</a>
+  </div>
+  <div class="verdict"><b>SLO 충족</b><span class="num">서버 1대에서 4대로 늘린 뒤 P95가 3100ms에서 550ms로 내려갔습니다.</span></div>
+  <div class="flow" id="A-flow"></div>
+  <div class="panels">
+    <div class="panel"><div class="h">P95 응답 시간 (ms)</div><div id="A-p95"></div></div>
+    <div class="panel"><div class="h">처리량 (초당 요청 수)</div><div id="A-tps"></div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="design" id="B" aria-label="리포트형">
+  <div class="meta num">2026년 9월 12일 00:52 실행<br>동시 사용자 50명, 부하 30초, SLO P95 1000ms, 판단 모델 solar-pro2</div>
+  <h1>서버를 1대에서 4대로 늘려 P95를 3100ms에서 550ms로 낮췄습니다.</h1>
+  <p class="lead">AI가 두 번 스케일링을 제안했고, 두 번 모두 사람이 승인했습니다. 2대에서는 SLO를 넘어서 한 번 더 늘렸습니다.</p>
+
+  <h2>측정 결과</h2>
+  <table class="num">
+    <thead><tr><th>측정</th><th>서버</th><th>처리량</th><th>P95</th><th>에러율</th><th>SLO</th></tr></thead>
+    <tbody id="B-rows"></tbody>
+  </table>
+  <div id="B-chart" style="margin-top:22px"></div>
+
+  <h2>판단 과정</h2>
+  <ol>
+    <li>1대에서 P95 3100ms로 SLO를 넘었습니다. AI는 한 대로는 동시 요청을 감당하지 못한다고 보고 2대를 제안했습니다. <span>(심각도 높음, 신뢰도 85%, 승인)</span></li>
+    <li>2대에서 P95 1100ms로 여전히 SLO를 넘었습니다. AI가 다시 4대를 제안했습니다. <span>(심각도 보통, 신뢰도 85%, 승인)</span></li>
+    <li>4대에서 P95 550ms로 SLO를 충족해 종료했습니다.</li>
+  </ol>
+
+  <h2>참고</h2>
+  <p class="limits">CPU와 메모리는 이 환경에서 수집되지 않아 판단에 쓰지 않았습니다. 에러율은 0.43%에서 0.59%로 조금 올랐습니다. 실시간 지표는 <a class="gf" href="#">Grafana</a>에서 볼 수 있습니다.</p>
+</section>
+
+<!-- C -->
+<section class="design" id="C" aria-label="미니멀형">
+  <div class="row1">
+    <div>
+      <p class="kicker">P95 응답 시간</p>
+      <h1 class="num"><span class="from">3100</span> → 550ms</h1>
+      <p class="slo">SLO 1000ms <b>충족</b>, 서버 1대에서 4대로</p>
+    </div>
+    <div class="side num">동시 사용자 50명<br>부하 30초<br><a href="#">Grafana에서 보기</a></div>
+  </div>
+  <div class="chart" id="C-chart"></div>
+  <div class="stats num">
+    <div class="stat"><div class="l">처리량</div><div class="v">115.1</div><div class="d">47.3에서 2.4배</div></div>
+    <div class="stat"><div class="l">에러율</div><div class="v">0.59%</div><div class="d worse">0.43%에서 올라감</div></div>
+    <div class="stat"><div class="l">서버</div><div class="v">4대</div><div class="d">AI 제안 2회, 모두 승인</div></div>
+    <div class="stat"><div class="l">AI 신뢰도</div><div class="v">85%</div><div class="d">두 판단 모두</div></div>
+  </div>
+  <details>
+    <summary>AI가 이렇게 판단한 이유</summary>
+    <p>1대: P95 3100ms로 SLO를 넘었고, 한 대로는 동시 요청 처리 능력이 부족하다고 보고 2대를 제안했습니다.</p>
+    <p>2대: P95 1100ms로 여전히 SLO를 넘어 4대를 제안했습니다. CPU와 메모리는 수집되지 않아 판단에서 뺐습니다.</p>
+  </details>
+</section>
+
+</div>
+
+<script>
+const D = {
+  slo: 1000,
+  rounds: [
+    { r: 1, srv: 1, tps: 47.3, p95: 3100, err: 0.43 },
+    { r: 2, srv: 2, tps: 94.0, p95: 1100, err: 0.47 },
+    { r: 3, srv: 4, tps: 115.1, p95: 550, err: 0.59 },
+  ],
+  steps: [
+    { from: 1, to: 2, sev: "심각도 높음", conf: 85 },
+    { from: 2, to: 4, sev: "심각도 보통", conf: 85 },
+  ],
+};
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+/* 막대 차트 (A, B 공용) */
+function bars(host, key, opt) {
+  const W = opt.w || 460, H = opt.h || 200, pad = { l: 8, r: 8, t: 22, b: 36 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": opt.label }, host);
+  const max = Math.max(...D.rounds.map(d => d[key]), opt.slo || 0) * 1.12;
+  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b, bw = Math.min(64, iw / D.rounds.length * 0.45);
+  const y = v => pad.t + ih - (v / max) * ih;
+  el("line", { x1: pad.l, x2: W - pad.r, y1: pad.t + ih, y2: pad.t + ih, stroke: opt.axis, "stroke-width": 1 }, svg);
+  D.rounds.forEach((d, i) => {
+    const cx = pad.l + iw * (i + 0.5) / D.rounds.length;
+    const fill = opt.color(d);
+    el("rect", { x: cx - bw / 2, y: y(d[key]), width: bw, height: pad.t + ih - y(d[key]), fill }, svg);
+    el("text", { x: cx, y: y(d[key]) - 6, "text-anchor": "middle", "font-size": 12.5, fill: opt.text, "font-weight": 600 }, svg, opt.fmt(d[key]));
+    el("text", { x: cx, y: H - 16, "text-anchor": "middle", "font-size": 12, fill: opt.muted }, svg, `서버 ${d.srv}대`);
+  });
+  if (opt.slo) {
+    el("line", { x1: pad.l, x2: W - pad.r, y1: y(opt.slo), y2: y(opt.slo), stroke: opt.sloColor, "stroke-dasharray": "5 4", "stroke-width": 1.2 }, svg);
+    el("text", { x: W - pad.r, y: y(opt.slo) - 5, "text-anchor": "end", "font-size": 11.5, fill: opt.sloColor }, svg, `SLO ${opt.slo}ms`);
+  }
+}
+
+/* A */
+(function () {
+  const flow = document.getElementById("A-flow");
+  D.rounds.forEach((d, i) => {
+    const ok = d.p95 <= D.slo;
+    const box = document.createElement("div");
+    box.className = "round num";
+    box.innerHTML = `<div class="h">측정 ${d.r}</div>
+      <div class="boxes">${"<i></i>".repeat(d.srv)}</div>
+      <div class="p95 ${ok ? "good" : "bad"}">${d.p95}<small>ms</small></div>
+      <div class="sub">${ok ? "SLO 충족" : "SLO 초과"}<br>처리량 ${d.tps}  에러율 ${d.err}%</div>`;
+    flow.appendChild(box);
+    const s = D.steps[i];
+    if (s) {
+      const st = document.createElement("div");
+      st.className = "step";
+      st.innerHTML = `<div>AI 제안 <em>${s.from}→${s.to}대</em><br>신뢰도 ${s.conf}%<br><em>승인</em></div>`;
+      flow.appendChild(st);
+    }
+  });
+  bars(document.getElementById("A-p95"), "p95", {
+    label: "라운드별 P95", slo: D.slo, axis: "#2c3039", text: "#ccccdc", muted: "#8e8e9e", sloColor: "#ff9830",
+    color: d => d.p95 <= D.slo ? "#73bf69" : "#f2495c", fmt: v => v + "ms",
+  });
+  bars(document.getElementById("A-tps"), "tps", {
+    label: "라운드별 처리량", axis: "#2c3039", text: "#ccccdc", muted: "#8e8e9e",
+    color: () => "#5794f2", fmt: v => v.toFixed(1),
+  });
+})();
+
+/* B */
+(function () {
+  const tb = document.getElementById("B-rows");
+  D.rounds.forEach(d => {
+    const ok = d.p95 <= D.slo;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${d.r}차</td><td>${d.srv}대</td><td>${d.tps.toFixed(1)}</td><td>${d.p95}ms</td><td>${d.err}%</td>
+      <td class="${ok ? "pass" : "fail"}">${ok ? "충족" : "초과"}</td>`;
+    tb.appendChild(tr);
+  });
+  // 선 차트: 서버 수에 따른 P95
+  const host = document.getElementById("B-chart");
+  const W = 668, H = 190, pad = { l: 44, r: 16, t: 16, b: 30 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "서버 수에 따른 P95" }, host);
+  const max = 3500, iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const x = i => pad.l + iw * i / (D.rounds.length - 1), y = v => pad.t + ih - v / max * ih;
+  [0, 1000, 2000, 3000].forEach(v => {
+    el("line", { x1: pad.l, x2: W - pad.r, y1: y(v), y2: y(v), stroke: v === 0 ? "#111" : "#eceef0" }, svg);
+    el("text", { x: pad.l - 8, y: y(v) + 4, "text-anchor": "end", "font-size": 11.5, fill: "#6b6f76" }, svg, v);
+  });
+  el("line", { x1: pad.l, x2: W - pad.r, y1: y(D.slo), y2: y(D.slo), stroke: "#c92a2a", "stroke-dasharray": "4 4" }, svg);
+  el("text", { x: W - pad.r, y: y(D.slo) - 6, "text-anchor": "end", "font-size": 11.5, fill: "#c92a2a" }, svg, "SLO 1000ms");
+  el("polyline", { points: D.rounds.map((d, i) => `${x(i)},${y(d.p95)}`).join(" "), fill: "none", stroke: "#111", "stroke-width": 2 }, svg);
+  D.rounds.forEach((d, i) => {
+    el("circle", { cx: x(i), cy: y(d.p95), r: 4.5, fill: d.p95 <= D.slo ? "#2b8a3e" : "#c92a2a" }, svg);
+    el("text", { x: x(i) + (i === D.rounds.length - 1 ? -8 : 8), y: y(d.p95) - 9, "text-anchor": i === D.rounds.length - 1 ? "end" : "start", "font-size": 12.5, "font-weight": 600, fill: "#111" }, svg, d.p95 + "ms");
+    el("text", { x: x(i), y: H - 8, "text-anchor": "middle", "font-size": 12, fill: "#6b6f76" }, svg, `서버 ${d.srv}대`);
+  });
+})();
+
+/* C: 계단형 P95 차트, SLO 초과 구간만 강조색 */
+(function () {
+  const host = document.getElementById("C-chart");
+  const W = 892, H = 260, pad = { l: 4, r: 4, t: 18, b: 34 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "측정별 P95 계단 차트" }, host);
+  const max = 3400, iw = W - pad.l - pad.r, ih = H - pad.t - pad.b, n = D.rounds.length, seg = iw / n;
+  const y = v => pad.t + ih - v / max * ih;
+  el("rect", { x: pad.l, y: y(D.slo), width: iw, height: pad.t + ih - y(D.slo), fill: "#eeeef0" }, svg);
+  el("text", { x: pad.l + 10, y: pad.t + ih - 10, "font-size": 12, fill: "#71717a" }, svg, "SLO 1000ms 이하 구간");
+  D.rounds.forEach((d, i) => {
+    const x0 = pad.l + seg * i, x1 = x0 + seg, bad = d.p95 > D.slo, color = bad ? "#dc4c1f" : "#18181b";
+    el("line", { x1: x0 + 6, x2: x1 - 6, y1: y(d.p95), y2: y(d.p95), stroke: color, "stroke-width": 3, "stroke-linecap": "round" }, svg);
+    if (i < n - 1) {
+      const nx = D.rounds[i + 1];
+      el("line", { x1: x1 - 6, x2: x1 + 6, y1: y(d.p95), y2: y(nx.p95), stroke: "#c4c4ca", "stroke-width": 1.5 }, svg);
+    }
+    el("text", { x: x0 + 8, y: y(d.p95) - 10, "font-size": 15, "font-weight": 600, fill: color }, svg, d.p95 + "ms");
+    el("text", { x: x0 + 8, y: H - 10, "font-size": 13, fill: "#71717a" }, svg, `서버 ${d.srv}대`);
+  });
+})();
+
+/* 시안 전환 */
+document.querySelectorAll(".switcher button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".switcher button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  document.querySelectorAll(".design").forEach(s => s.classList.toggle("active", s.id === b.dataset.t));
+}));
+</script>
+</body>
+</html>
