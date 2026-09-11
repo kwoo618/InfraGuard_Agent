@@ -52,14 +52,24 @@ services:
     privileged: true
 
   grafana:
-    image: grafana/grafana:latest
+    # latest 금지 — 2026-09-12 로컬에서 동작을 확인한 버전으로 고정 (#74)
+    image: grafana/grafana:13.1.0
     container_name: infraguard-grafana
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+      # 로그인 없이 보기 전용(Viewer)으로 연다. 관리자(admin)는 /login으로 들어간다.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      # 결과 패널의 Grafana 링크(http://localhost:3000)가 홈 화면으로 이 대시보드를 바로 연다.
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/dashboard.json
     volumes:
       - ./infra/grafana:/var/lib/grafana/dashboards:ro
+      # 데이터소스(uid "prometheus")·대시보드 자동 로드 (docs/02 ISSUE-4).
+      # 이미지 기본 provisioning 디렉터리 전체를 덮지 않도록 하위 디렉터리만 마운트한다.
+      - ./infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
     depends_on:
       - prometheus
 
