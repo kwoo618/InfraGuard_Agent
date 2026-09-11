@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from app.agent import nodes
 from app.agent.state import create_initial_state
-from app.api.v1 import agent, run_history
+from app.api.v1 import agent, run_history, saved_results
 from app.api.v1.agent import before_measurements, run_records, task_manager
 from app.main import app
 from app.api.v1.run_history import (
@@ -307,6 +307,17 @@ async def _assert_report_matches_file(data: dict) -> dict:
     assert report["approvals"] == data["approvals"]
     assert report["scaling_results"] == data["scaling_results"]
     assert report["revalidations"] == data["revalidations"]
+
+    # 저장된 결과 불러오기(#93): 같은 결과 파일을 /report 모양으로 바꾸면 /report와 같아야 한다.
+    # waiting_for_approval은 파일에 없고(null), result_file은 디렉터리가 다르다(results/ vs docs/evidence/)
+    file_name = Path(report["result_file"]).name
+    converted = saved_results.saved_record_to_report(data, file_name)
+
+    assert converted.keys() == report.keys()
+    for key in report.keys() - {"waiting_for_approval", "result_file"}:
+        assert converted[key] == report[key], key
+    assert converted["waiting_for_approval"] is None
+    assert Path(converted["result_file"]).name == file_name
 
     return report
 

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.api.v1.agent import router as agent_router
+from app.api.v1.saved_results import router as saved_results_router
 
 app = FastAPI(title="InfraGuard Agent System")
 
@@ -18,6 +19,8 @@ app.add_middleware(
 
 
 app.include_router(agent_router, prefix="/api/v1")
+# 저장된 결과 파일(docs/evidence) 읽기 전용 조회 — 결과 패널 불러오기 (#93)
+app.include_router(saved_results_router, prefix="/api/v1")
 
 
 # 상대경로("app/static")는 실행 시점의 cwd에 따라 깨진다.
