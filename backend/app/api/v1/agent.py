@@ -155,6 +155,10 @@ async def get_report(task_id: str):
 
     Phase 3(#75)에서 추가한 필드: measurement_history(라운드별 측정 이력),
     forced_scaling(force_scaling 덮어쓰기 여부), result_file(저장된 결과 파일 경로).
+
+    Phase 4(#75)에서 추가한 필드 (UI 결과 패널용, 결과 파일과 같은 값):
+    conditions, end_reason, user_decision, diagnoses, approvals, scaling_results, revalidations.
+    기존 필드는 삭제·이름 변경하지 않는다.
     """
     state = task_manager.states.get(task_id)
 
@@ -238,6 +242,17 @@ async def get_report(task_id: str):
         "forced_scaling": recorder.forced_scaling if recorder else False,
         # 저장된 결과 파일 경로 (repo 루트 기준). 실행이 끝나기 전이거나 저장 실패면 None
         "result_file": recorder.result_file_relative if recorder else None,
+        # ---- Phase 4(#75) 결과 패널용 필드. 결과 파일의 같은 이름 항목과 같은 값이다 ----
+        # 측정 조건 (virtual_users, duration_sec, p95_slo_ms, start_replicas, llm_model 등)
+        "conditions": recorder.conditions if recorder else None,
+        # 종료 경로 (no_scaling_proposed / scaled / rejected / failed 등). 실행이 끝나기 전이면 None
+        "end_reason": recorder.end_reason if recorder else None,
+        # 마지막 승인 요청 기준 사용자 결정 (approved / rejected / no_response / not_applicable)
+        "user_decision": recorder.user_decision if recorder else None,
+        "diagnoses": recorder.diagnoses if recorder else [],          # 라운드별 LLM 원본 판단
+        "approvals": recorder.approvals if recorder else [],          # 승인 요청과 사용자 결정
+        "scaling_results": recorder.scaling_results if recorder else [],
+        "revalidations": recorder.revalidations if recorder else [],  # 재검증 요약 (LLM 변화량 제외)
     }
 
 

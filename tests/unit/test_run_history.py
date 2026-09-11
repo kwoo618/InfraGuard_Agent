@@ -280,6 +280,25 @@ def _only_result_file(directory: Path) -> dict:
     return json.loads(files[0].read_text(encoding="utf-8"))
 
 
+async def _assert_report_matches_file(data: dict) -> dict:
+    """/report 기존 필드가 유지되고, 결과 패널용 필드(Phase 4)가 결과 파일과 같은지 확인한다."""
+
+    report = await agent.get_report(data["task_id"])
+
+    assert EXISTING_REPORT_FIELDS <= report.keys()
+    assert report["measurement_history"] == data["measurement_history"]
+    assert report["forced_scaling"] == data["forced_scaling"]
+    assert report["conditions"] == data["conditions"]
+    assert report["end_reason"] == data["outcome"]["end_reason"]
+    assert report["user_decision"] == data["user_decision"]
+    assert report["diagnoses"] == data["diagnoses"]
+    assert report["approvals"] == data["approvals"]
+    assert report["scaling_results"] == data["scaling_results"]
+    assert report["revalidations"] == data["revalidations"]
+
+    return report
+
+
 # ----------------------------------------------------------------------
 # RunRecorder 단위 테스트
 # ----------------------------------------------------------------------
@@ -499,6 +518,13 @@ async def test_stream_no_scaling_proposed_saves_file(
     assert data["outcome"]["agent_outcome"] == "diagnosed"
     assert data["outcome"]["end_reason"] == "no_scaling_proposed"
 
+    report = await _assert_report_matches_file(data)
+
+    assert report["end_reason"] == "no_scaling_proposed"
+    assert report["user_decision"] == "not_applicable"
+    assert report["conditions"]["p95_slo_ms"] == 1000
+    assert report["conditions"]["virtual_users"] == 50
+
 
 async def test_stream_approved_scaling_records_two_rounds_and_report(
     results_dir,
@@ -557,10 +583,11 @@ async def test_stream_approved_scaling_records_two_rounds_and_report(
     assert data["outcome"]["agent_outcome"] == "scaled"
     assert data["outcome"]["end_reason"] == "scaled"
 
-    report = await agent.get_report(data["task_id"])
+    report = await _assert_report_matches_file(data)
 
-    assert EXISTING_REPORT_FIELDS <= report.keys()
-    assert report["measurement_history"] == history
+    assert report["end_reason"] == "scaled"
+    assert report["user_decision"] == "approved"
+    assert report["scaling_results"][0]["after_replicas"] == 2
     assert report["measurement"]["tps"] == history[0]["tps"]
     assert report["measurement_after"]["tps"] == history[1]["tps"]
     assert report["forced_scaling"] is False
@@ -593,6 +620,17 @@ async def test_stream_rejected_keeps_diagnosed_outcome(
     assert data["outcome"]["agent_outcome"] == "diagnosed"
     assert data["outcome"]["end_reason"] == "rejected"
 
+    report = await _assert_report_matches_file(data)
+
+    # 거절이면 state outcome은 diagnosed지만 /report의 end_reason·user_decision으로 구분된다
+    assert report["outcome"] == "diagnosed"
+    assert report["end_reason"] == "rejected"
+    assert report["user_decision"] == "rejected"
+    assert report["approvals"][0]["scaling_plan"] == {
+        "current_replicas": 1,
+        "desired_replicas": 2,
+    }
+
 
 @pytest.mark.parametrize(
     ("fail_before_load", "expected_rounds"),
@@ -624,6 +662,11 @@ async def test_stream_failed_diagnosis_saves_file(
     assert data["outcome"]["agent_outcome"] == "failed"
     assert data["outcome"]["end_reason"] == "failed"
     assert data["outcome"]["error"]
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["end_reason"] == "failed"
+    assert report["error"] == data["outcome"]["error"]
 
 
 async def test_stream_infra_check_failure_saves_file(results_dir, monkeypatch):
@@ -672,9 +715,10 @@ async def test_stream_forced_scaling_is_recorded(
     assert data["diagnoses"][0]["requires_scaling"] is False
     assert data["outcome"]["end_reason"] == "scaled"
 
-    report = await agent.get_report(data["task_id"])
+    report = await _assert_report_matches_file(data)
 
     assert report["forced_scaling"] is True
+    assert report["approvals"][0]["source"] == "forced"
 
 
 async def test_stream_force_request_without_debug_is_not_forced(
@@ -737,8 +781,17 @@ async def test_stream_closed_while_waiting_for_approval_saves_file(
     stream = agent.start_agent_stream(target_tps=50, duration=10)
 
     async for frame in stream:
-        if _parse(frame)["status"] == "need_approval":
+        event = _parse(frame)
+        if event["status"] == "need_approval":
             break
+
+    # 실행이 끝나기 전 /report: end_reason·result_file은 아직 없고 승인 요청은 결정 전이다
+    report = await agent.get_report(event["task_id"])
+
+    assert report["waiting_for_approval"] is True
+    assert report["end_reason"] is None
+    assert report["result_file"] is None
+    assert report["approvals"][0]["decision"] is None
 
     # 승인 대기 중 클라이언트가 연결을 끊은 경우
     await stream.aclose()

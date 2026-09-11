@@ -23,6 +23,7 @@ engine은 상태 dict를 제자리에서 갱신하고, 새 측정·진단·스�
 """
 
 import ast
+import copy
 import json
 import logging
 import os
@@ -354,6 +355,8 @@ class RunRecorder:
 
         self.forced_scaling = False
         self.result_file: Path | None = None
+        # finalize()가 기록하는 종료 경로 (결과 파일 outcome.end_reason). 실행 중이면 None
+        self.end_reason: str | None = None
 
         self._history: list[dict[str, Any]] = []
         self._diagnoses: list[dict[str, Any]] = []
@@ -382,6 +385,32 @@ class RunRecorder:
         """/report measurement_history와 결과 파일에 들어가는 라운드별 측정 레코드."""
 
         return [dict(record) for record in self._history]
+
+    # 아래 네 속성은 /report(Phase 4 결과 패널)와 결과 파일이 같이 쓴다. 복사본을 돌려준다.
+
+    @property
+    def diagnoses(self) -> list[dict[str, Any]]:
+        """라운드별 LLM 원본 판단 (forced 실행도 LLM 원본 그대로)."""
+
+        return copy.deepcopy(self._diagnoses)
+
+    @property
+    def approvals(self) -> list[dict[str, Any]]:
+        """승인 요청(source: llm/forced, scaling_plan)과 사용자 결정."""
+
+        return copy.deepcopy(self._approvals)
+
+    @property
+    def scaling_results(self) -> list[dict[str, Any]]:
+        """스케일링 실행 결과 (before/after replicas, success)."""
+
+        return copy.deepcopy(self._scaling_results)
+
+    @property
+    def revalidations(self) -> list[dict[str, Any]]:
+        """재검증 LLM 요약과 개선 여부 (LLM이 계산한 변화량은 제외)."""
+
+        return copy.deepcopy(self._revalidations)
 
     @property
     def scaling_performed(self) -> bool:
@@ -648,10 +677,10 @@ class RunRecorder:
             "conditions": self.conditions,
             "forced_scaling": self.forced_scaling,
             "measurement_history": self.measurement_history,
-            "diagnoses": self._diagnoses,
-            "approvals": self._approvals,
-            "scaling_results": self._scaling_results,
-            "revalidations": self._revalidations,
+            "diagnoses": self.diagnoses,
+            "approvals": self.approvals,
+            "scaling_results": self.scaling_results,
+            "revalidations": self.revalidations,
             "user_decision": self.user_decision,
             "outcome": {
                 "agent_outcome": state.get("agent_outcome"),
@@ -684,6 +713,7 @@ class RunRecorder:
             return self.result_file
 
         self._finalized = True
+        self.end_reason = end_reason
 
         try:
             self._observe(state)
