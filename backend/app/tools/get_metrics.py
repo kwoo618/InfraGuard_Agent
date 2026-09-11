@@ -88,3 +88,73 @@ async def get_system_metrics() -> SystemMetrics:
         mem_pct=0.0,      # 측정값 아님 (RESOURCE_METRICS_COLLECTED=False). cAdvisor 연동 시 교체
         connection_count=int(connection_count),
     )
+
+
+# ---------------------------------------------------------------------
+# 서버별 요청 분산 (결과 패널 그래프, docs/03 Phase 4)
+# ---------------------------------------------------------------------
+# 서버별로 세는 핸들러. Locust 시나리오 중 /health는 뺀다:
+# docker-compose 헬스체크가 replica마다 5초에 한 번 /health를 호출해서 부하 요청과 구분할 수 없다.
+# /metrics(Prometheus 수집 요청)도 뺀다. 그래프에 이 제외 사실을 함께 표시한다.
+LOAD_HANDLERS = ("/light", "/heavy", "/flaky")
+EXCLUDED_HANDLERS = ("/health", "/metrics")
+
+
+async def get_request_counts_by_instance() -> dict[str, float] | None:
+    """
+    target-server 인스턴스(replica)별 누적 요청 수 (LOAD_HANDLERS만, 카운터 원본값).
+
+    부하 직전과 부하가 끝난 뒤(다음 scrape 이후) 두 번 조회해 차이를 보면
+    부하 요청이 서버별로 어떻게 나뉘었는지 알 수 있다 (instance_request_deltas).
+    조회 실패는 None이다. 측정값이 아니므로 0으로 채우지 않는다.
+    아직 요청을 한 번도 받지 않은 인스턴스는 결과에 없다.
+    """
+
+    handlers = "|".join(LOAD_HANDLERS)
+    promql = (
+        f'sum by (instance) (http_requests_total{{job="target-server", handler=~"{handlers}"}})'
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=QUERY_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{PROMETHEUS_URL}/api/v1/query",
+                params={"query": promql},
+            )
+
+        if response.status_code != 200:
+            return None
+
+        result = response.json().get("data", {}).get("result", [])
+
+        return {
+            item["metric"]["instance"]: float(item["value"][1])
+            for item in result
+        }
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def instance_request_deltas(
+    before: dict[str, float] | None,
+    after: dict[str, float] | None,
+) -> dict[str, int | None] | None:
+    """
+    부하 전후 카운터 차이 = 인스턴스별 부하 요청 수.
+
+    - before에 없는 인스턴스(스케일로 새로 뜬 replica)는 0에서 시작한 것으로 본다.
+      LOAD_HANDLERS 요청은 부하 중에만 들어오기 때문이다.
+    - 차이가 음수(컨테이너 재시작으로 카운터 초기화)면 그 인스턴스는 None이다.
+    - 어느 한쪽 조회가 실패했으면 None.
+    """
+
+    if before is None or after is None:
+        return None
+
+    deltas: dict[str, int | None] = {}
+
+    for instance, value in sorted(after.items()):
+        delta = value - before.get(instance, 0.0)
+        deltas[instance] = round(delta) if delta >= 0 else None
+
+    return deltas
