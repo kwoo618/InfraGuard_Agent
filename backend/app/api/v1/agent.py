@@ -7,7 +7,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent.engine import resume_after_approval, run_diagnosis
+from app.agent.nodes import call_solar_api
 from app.agent.state import AgentRuntimeState, create_initial_state
+from app.api.v1.run_history import RunRecorder
+from app.tools.scale_service import get_current_replicas
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
 router = APIRouter()
@@ -25,6 +28,12 @@ DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() 
 # 자체 저장소에 따로 보관한다. key: task_id, value: LoadTestResult(스케일링 전).
 before_measurements: dict[str, "LoadTestResult"] = {}
 
+# 실행 1회의 라운드별 측정 이력·AI 판단·사용자 결정·스케일링 결과를 모으는 기록기.
+# before_measurements와 같은 이유로 state.py 대신 agent.py 자체 저장소에 둔다.
+# /report의 measurement_history와 results/*.json 결과 파일이 여기서 나온다 (docs/03 Phase 3, #75).
+# key: task_id, value: RunRecorder
+run_records: dict[str, RunRecorder] = {}
+
 
 def _sse(status: str, task_id: str | None, message: str) -> str:
     """
@@ -36,6 +45,20 @@ def _sse(status: str, task_id: str | None, message: str) -> str:
     safe_message = message.replace('"', "'").replace("\n", " ")
     task_id_json = f"\"{task_id}\"" if task_id else "null"
     return f"data: {{\"status\": \"{status}\", \"task_id\": {task_id_json}, \"message\": \"{safe_message}\"}}\n\n"
+
+
+async def _read_replicas() -> int:
+    """
+    현재 target-server replica 수를 읽는다.
+
+    docker compose ps를 subprocess로 실행하는 동기 함수라 이벤트 루프를 막지 않게
+    스레드에서 실행한다. 조회 실패는 0 (결과 파일에는 null로 저장된다).
+    """
+    try:
+        return await asyncio.to_thread(get_current_replicas)
+    except Exception as exc:
+        print(f"[run_history] replica 조회 실패: {exc}")
+        return 0
 
 
 # =================================================================
@@ -129,6 +152,9 @@ async def get_report(task_id: str):
     측정값(load_test_result, 스케일링 전/후), LLM 병목 진단(bottleneck_report),
     최적화 조치 목록(optimization_plan), 스케일링 조치(scaling_result),
     그리고 LLM이 생성한 최종 요약(final_answer)을 함께 반환합니다.
+
+    Phase 3(#75)에서 추가한 필드: measurement_history(라운드별 측정 이력),
+    forced_scaling(force_scaling 덮어쓰기 여부), result_file(저장된 결과 파일 경로).
     """
     state = task_manager.states.get(task_id)
 
@@ -139,6 +165,7 @@ async def get_report(task_id: str):
     scaling_result = state.get("scaling_result")
     bottleneck_report = state.get("bottleneck_report")
     before_load_test_result = before_measurements.get(task_id)
+    recorder = run_records.get(task_id)
 
     def _serialize_measurement(result):
         if result is None:
@@ -205,6 +232,12 @@ async def get_report(task_id: str):
         "optimization_plan": optimization_plan,   # 최적화 조치 목록 (generate_plan_node 결과)
         "summary": state.get("final_answer"),   # LLM이 생성한 자연어 최종 요약
         "error": state.get("error"),
+        # 라운드별 측정 이력 (initial, after_scaling...). 결과 파일의 measurement_history와 같다
+        "measurement_history": recorder.measurement_history if recorder else [],
+        # force_scaling이 LLM 판단을 실제로 덮어썼으면 true (이 실행의 수치는 발표용이 아님)
+        "forced_scaling": recorder.forced_scaling if recorder else False,
+        # 저장된 결과 파일 경로 (repo 루트 기준). 실행이 끝나기 전이거나 저장 실패면 None
+        "result_file": recorder.result_file_relative if recorder else None,
     }
 
 
@@ -238,6 +271,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
     승인 후 스케일링 + LLM 재검증은 app.agent.engine.resume_after_approval이 담당한다.
     이 함수는 그 결과를 받아 SSE로 중계하고, 스케일링 후에도 개선이 부족해 LLM이
     다시 승인을 요구하면(ReAct Loop) MAX_LOOP까지 반복해서 승인 단계로 돌아간다.
+
+    결과 저장 (Phase 3, #75): 실행이 끝나는 모든 경로(미제안·스케일링 완료·거절·실패)에서
+    종료 SSE를 보내기 직전에 results/*.json으로 저장한다(RunRecorder.finalize).
+    UI가 종료 이벤트를 받자마자 /report를 조회하므로 저장이 먼저 끝나야 한다.
+    이 경로를 거치지 못한 종료(클라이언트 연결 종료 등)는 finally에서 stream_closed로 저장한다.
+    저장 실패는 로그만 남기고 흐름을 멈추지 않는다.
     """
 
     # 1. AgentRuntimeState 데이터 초기화
@@ -249,148 +288,213 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
 
     task_id = task_manager.register_task(state)
 
-    # =================================================================
-    # [1단계: 인프라 헬스체크]
-    # =================================================================
-    yield _sse("running", task_id, "🔍 인프라 연결 확인 중...")
-    await asyncio.sleep(0.3)
+    recorder = RunRecorder(
+        task_id=task_id,
+        target_tps=target_tps,
+        duration=duration,
+        force_scaling_requested=force_scaling,
+        debug_endpoints_enabled=DEBUG_ENDPOINTS_ENABLED,
+    )
+    run_records[task_id] = recorder
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/", timeout=3.0)
-            if response.status_code not in [200, 302]:
-                yield _sse("failed", task_id, f"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})")
+    # 재검증 LLM 응답 원문을 결과 파일에 남기기 위해 호출 결과만 가로챈다.
+    # 호출 자체는 engine 기본값(call_solar_api)과 같다.
+    async def _capture_revalidation(system_prompt: str, user_prompt: str) -> str:
+        content = await call_solar_api(system_prompt, user_prompt)
+        recorder.capture_revalidation(content)
+        return content
+
+    try:
+        # =================================================================
+        # [1단계: 인프라 헬스체크]
+        # =================================================================
+        yield _sse("running", task_id, "🔍 인프라 연결 확인 중...")
+        await asyncio.sleep(0.3)
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/", timeout=3.0)
+                if response.status_code not in [200, 302]:
+                    message = f"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})"
+                    recorder.finalize(state, "failed", message)
+                    yield _sse("failed", task_id, message)
+                    return
+            except (httpx.ConnectError, httpx.TimeoutException):
+                message = "❌ 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요."
+                recorder.finalize(state, "failed", message)
+                yield _sse("failed", task_id, message)
                 return
-        except (httpx.ConnectError, httpx.TimeoutException):
-            yield _sse("failed", task_id, "❌ 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요.")
-            return
 
-    yield _sse("running", task_id, "✅ 인프라 연결 확인")
-    await asyncio.sleep(0.3)
+        yield _sse("running", task_id, "✅ 인프라 연결 확인")
 
-    # =================================================================
-    # [2~4단계: 부하 테스트 + 메트릭 수집 + AI 병목 진단]
-    # engine.run_diagnosis가 세 단계를 순차적으로 실행하고,
-    # 실패해도 예외를 던지지 않고 agent_outcome="failed" 상태로 안전하게 반환한다.
-    # =================================================================
-    yield _sse("analyzing", task_id, f"⚡ 부하 테스트 진행 중... ({duration}초)")
+        # 측정 조건: 진단 시작 전 실제 replica 수 (결과 파일 start_replicas = 최초 측정의 replicas)
+        recorder.set_start_replicas(await _read_replicas())
+        await asyncio.sleep(0.3)
 
-    state = await run_diagnosis(state)
+        # =================================================================
+        # [2~4단계: 부하 테스트 + 메트릭 수집 + AI 병목 진단]
+        # engine.run_diagnosis가 세 단계를 순차적으로 실행하고,
+        # 실패해도 예외를 던지지 않고 agent_outcome="failed" 상태로 안전하게 반환한다.
+        # =================================================================
+        yield _sse("analyzing", task_id, f"⚡ 부하 테스트 진행 중... ({duration}초)")
 
-    if state["agent_outcome"] == "failed":
-        yield _sse("failed", task_id, f"❌ {state.get('error') or '진단에 실패했습니다.'}")
-        return
-
-    load_test_result = state.get("load_test_result")
-    if load_test_result is not None:
-        yield _sse(
-            "analyzing",
-            task_id,
-            f"✅ 부하 테스트 완료  TPS {load_test_result.tps:.1f} / 에러율 {load_test_result.error_rate * 100:.1f}%",
-        )
-
-    yield _sse("analyzing", task_id, "🧠 AI 분석 완료")
-
-    # ---- [디버그 전용] force_scaling=true인데 실제로는 병목이 없다고 판단된 경우 ----
-    # HITL 승인 → 스케일링 → 재검증 흐름을 수동으로 테스트하기 위해,
-    # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
-    # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
-    #
-    # main.js가 force_scaling=true를 매 요청마다 자동으로 보내기 때문에,
-    # DEBUG_ENDPOINTS_ENABLED가 꺼져있는(=정상적인 프로덕션/일반 사용자) 경우에도
-    # 이 분기를 매번 타게 된다. 화면에 디버그 경고를 노출하면 사용자가 오해할 수
-    # 있으므로, 꺼져있을 땐 조용히 무시하고 서버 콘솔에만 남긴다.
-    if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
-        print(f"[force_scaling] 무시됨 (DEBUG_ENDPOINTS_ENABLED=false) task_id={task_id}")
-
-    if force_scaling and DEBUG_ENDPOINTS_ENABLED and state["agent_outcome"] == "diagnosed":
-        from app.tools.scale_service import SERVICE_NAME, get_current_replicas
-
-        current_replicas = max(get_current_replicas(), 1)
-
-        yield _sse("analyzing", task_id, "🧪 [디버그] force_scaling=true — 병목 판단을 강제로 덮어씁니다.")
-
-        state.update({
-            "agent_outcome": "awaiting_approval",
-            "scaling_required": True,
-            "waiting_for_approval": True,
-            "scaling_plan": {
-                "service_name": SERVICE_NAME,
-                "current_replicas": current_replicas,
-                "desired_replicas": current_replicas + 1,
-                "reason": "[디버그] force_scaling 파라미터로 강제 지정된 사유입니다.",
-            },
-            "final_answer": (
-                f"[디버그] {SERVICE_NAME}를 {current_replicas}개에서 "
-                f"{current_replicas + 1}개로 강제 확장 테스트를 진행합니다."
-            ),
-        })
-
-    # =================================================================
-    # [5~6단계: 승인 → 스케일링 → 재검증] — ReAct Loop
-    # 병목이 없으면(diagnosed) 바로 종료.
-    # 병목이 있으면(awaiting_approval) 승인 받고 스케일링 + 재검증.
-    # 재검증 후에도 개선이 부족하면 LLM이 다시 awaiting_approval을 반환할 수 있어
-    # MAX_LOOP(engine/nodes.py에서 강제)까지 이 루프를 반복한다.
-    # =================================================================
-    while True:
-        outcome = state["agent_outcome"]
-
-        if outcome == "diagnosed":
-            summary = state.get("final_answer") or "병목이 발견되지 않았습니다."
-            yield _sse("done", task_id, f"✅ {summary}")
-            return
-
-        if outcome == "failed":
-            yield _sse("failed", task_id, f"❌ {state.get('error') or '진단에 실패했습니다.'}")
-            return
-
-        if outcome != "awaiting_approval":
-            # 예상 못한 상태값에 대한 방어 (engine/nodes 계약이 바뀌었을 가능성)
-            yield _sse("failed", task_id, f"❌ 알 수 없는 진단 상태입니다: {outcome}")
-            return
-
-        # ---- 승인 요청 ----
-        task_manager.create_approval_gate(task_id)
-
-        approval_message = state.get("final_answer") or "병목 감지 — 서버 증설이 필요합니다. 승인해주세요."
-        yield _sse("need_approval", task_id, f"⚠️ {approval_message}")
-
-        # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
-        approved = await task_manager.wait_for_approval(task_id)
-
-        # resume_after_approval()이 재검증하면서 load_test_result를 "이후" 값으로
-        # 덮어쓰기 전에, "이전" 값을 스냅샷해둔다. (다회차 루프에서도 최초 1회만 저장)
-        if task_id not in before_measurements and state.get("load_test_result") is not None:
-            before_measurements[task_id] = state["load_test_result"]
-
-        state = await resume_after_approval(state, approved)
-
-        if not approved:
-            message = state.get("final_answer") or "서버 증설이 거부되었습니다."
-            yield _sse("failed", task_id, f"❌ {message}")
-            return
+        state = await run_diagnosis(state)
+        recorder.observe(state)
 
         if state["agent_outcome"] == "failed":
-            yield _sse("failed", task_id, f"❌ {state.get('error') or '스케일링에 실패했습니다.'}")
+            message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
+            recorder.finalize(state, "failed", message)
+            yield _sse("failed", task_id, message)
             return
 
-        # ---- 스케일링 결과 안내 ----
-        scaling_result = state.get("scaling_result")
-        if scaling_result is not None:
+        load_test_result = state.get("load_test_result")
+        if load_test_result is not None:
             yield _sse(
-                "scaling",
+                "analyzing",
                 task_id,
-                f"✅ 서버 증설 완료  {scaling_result.before_replicas}대 → {scaling_result.after_replicas}대",
+                f"✅ 부하 테스트 완료  TPS {load_test_result.tps:.1f} / 에러율 {load_test_result.error_rate * 100:.1f}%",
             )
 
-        yield _sse("remeasuring", task_id, "🔁 재검증 중...")
+        yield _sse("analyzing", task_id, "🧠 AI 분석 완료")
 
-        if state["agent_outcome"] == "scaled":
-            summary = state.get("final_answer") or "스케일링 후 성능이 개선됐습니다."
-            yield _sse("done", task_id, f"✅ {summary}")
-            return
+        # ---- [디버그 전용] force_scaling=true인데 실제로는 병목이 없다고 판단된 경우 ----
+        # HITL 승인 → 스케일링 → 재검증 흐름을 수동으로 테스트하기 위해,
+        # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
+        # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
+        #
+        # main.js가 force_scaling=true를 매 요청마다 자동으로 보내기 때문에,
+        # DEBUG_ENDPOINTS_ENABLED가 꺼져있는(=정상적인 프로덕션/일반 사용자) 경우에도
+        # 이 분기를 매번 타게 된다. 화면에 디버그 경고를 노출하면 사용자가 오해할 수
+        # 있으므로, 꺼져있을 땐 조용히 무시하고 서버 콘솔에만 남긴다.
+        if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
+            print(f"[force_scaling] 무시됨 (DEBUG_ENDPOINTS_ENABLED=false) task_id={task_id}")
 
-        # agent_outcome이 다시 "awaiting_approval"(또는 "diagnosed")이면
-        # while 루프 맨 위로 돌아가 그 상태에 맞게 처리한다.
-        continue
+        if force_scaling and DEBUG_ENDPOINTS_ENABLED and state["agent_outcome"] == "diagnosed":
+            # get_current_replicas는 모듈 상단 import를 쓴다. 여기서 함께 import하면
+            # 함수 전체에서 지역 변수가 되어 위의 _read_replicas 흐름과 테스트 mock이 어긋난다.
+            from app.tools.scale_service import SERVICE_NAME
+
+            current_replicas = max(get_current_replicas(), 1)
+
+            yield _sse("analyzing", task_id, "🧪 [디버그] force_scaling=true — 병목 판단을 강제로 덮어씁니다.")
+
+            state.update({
+                "agent_outcome": "awaiting_approval",
+                "scaling_required": True,
+                "waiting_for_approval": True,
+                "scaling_plan": {
+                    "service_name": SERVICE_NAME,
+                    "current_replicas": current_replicas,
+                    "desired_replicas": current_replicas + 1,
+                    "reason": "[디버그] force_scaling 파라미터로 강제 지정된 사유입니다.",
+                },
+                "final_answer": (
+                    f"[디버그] {SERVICE_NAME}를 {current_replicas}개에서 "
+                    f"{current_replicas + 1}개로 강제 확장 테스트를 진행합니다."
+                ),
+            })
+
+            # LLM 판단(diagnosed)을 실제로 덮어썼다 → 결과 파일 forced_scaling=true.
+            # bottleneck_report는 LLM 원본(requires_scaling=false) 그대로 남는다. (docs/02 ISSUE-10)
+            recorder.mark_forced()
+
+        # =================================================================
+        # [5~6단계: 승인 → 스케일링 → 재검증] — ReAct Loop
+        # 병목이 없으면(diagnosed) 바로 종료.
+        # 병목이 있으면(awaiting_approval) 승인 받고 스케일링 + 재검증.
+        # 재검증 후에도 개선이 부족하면 LLM이 다시 awaiting_approval을 반환할 수 있어
+        # MAX_LOOP(engine/nodes.py에서 강제)까지 이 루프를 반복한다.
+        # =================================================================
+        while True:
+            outcome = state["agent_outcome"]
+
+            if outcome == "diagnosed":
+                summary = state.get("final_answer") or "병목이 발견되지 않았습니다."
+                message = f"✅ {summary}"
+                end_reason = (
+                    "no_further_scaling" if recorder.scaling_performed else "no_scaling_proposed"
+                )
+                recorder.finalize(state, end_reason, message)
+                yield _sse("done", task_id, message)
+                return
+
+            if outcome == "failed":
+                message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
+                recorder.finalize(state, "failed", message)
+                yield _sse("failed", task_id, message)
+                return
+
+            if outcome != "awaiting_approval":
+                # 예상 못한 상태값에 대한 방어 (engine/nodes 계약이 바뀌었을 가능성)
+                message = f"❌ 알 수 없는 진단 상태입니다: {outcome}"
+                recorder.finalize(state, "failed", message)
+                yield _sse("failed", task_id, message)
+                return
+
+            # ---- 승인 요청 ----
+            task_manager.create_approval_gate(task_id)
+            recorder.open_approval(state)
+
+            approval_message = state.get("final_answer") or "병목 감지 — 서버 증설이 필요합니다. 승인해주세요."
+            yield _sse("need_approval", task_id, f"⚠️ {approval_message}")
+
+            # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
+            approved = await task_manager.wait_for_approval(task_id)
+            recorder.close_approval(approved)
+
+            # resume_after_approval()이 재검증하면서 load_test_result를 "이후" 값으로
+            # 덮어쓰기 전에, "이전" 값을 스냅샷해둔다. (다회차 루프에서도 최초 1회만 저장)
+            if task_id not in before_measurements and state.get("load_test_result") is not None:
+                before_measurements[task_id] = state["load_test_result"]
+
+            state = await resume_after_approval(
+                state,
+                approved,
+                revalidation_caller=_capture_revalidation,
+            )
+            recorder.observe(state)
+
+            if not approved:
+                message = state.get("final_answer") or "서버 증설이 거부되었습니다."
+                message = f"❌ {message}"
+                recorder.finalize(state, "rejected", message)
+                yield _sse("failed", task_id, message)
+                return
+
+            if state["agent_outcome"] == "failed":
+                message = f"❌ {state.get('error') or '스케일링에 실패했습니다.'}"
+                recorder.finalize(state, "failed", message)
+                yield _sse("failed", task_id, message)
+                return
+
+            # ---- 스케일링 결과 안내 ----
+            scaling_result = state.get("scaling_result")
+            if scaling_result is not None:
+                yield _sse(
+                    "scaling",
+                    task_id,
+                    f"✅ 서버 증설 완료  {scaling_result.before_replicas}대 → {scaling_result.after_replicas}대",
+                )
+
+            yield _sse("remeasuring", task_id, "🔁 재검증 중...")
+
+            if state["agent_outcome"] == "scaled":
+                summary = state.get("final_answer") or "스케일링 후 성능이 개선됐습니다."
+                message = f"✅ {summary}"
+                recorder.finalize(state, "scaled", message)
+                yield _sse("done", task_id, message)
+                return
+
+            # agent_outcome이 다시 "awaiting_approval"(또는 "diagnosed")이면
+            # while 루프 맨 위로 돌아가 그 상태에 맞게 처리한다.
+            continue
+
+    except Exception as exc:
+        # 예상 못한 예외도 실행 기록으로 남긴 뒤 원래대로 전파한다.
+        recorder.finalize(state, "failed", f"스트림 처리 중 예외: {exc}")
+        raise
+
+    finally:
+        # 정상 종료 경로는 이미 저장했다(finalize는 멱등). 종료 경로를 거치지 못한 실행
+        # (승인 대기·진단 중 클라이언트 연결 종료로 스트림이 닫힌 경우 등)도 결과 파일로 남긴다.
+        recorder.finalize(state, "stream_closed")
