@@ -231,6 +231,6 @@ TARGET_SERVER_URL=http://localhost:8080
 - 변경 후 반드시 `pytest tests/` 통과 확인.
 
 ### 알려진 이슈
-- prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨 → dns_sd_configs로 교체 필요
+- ~~prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨~~ → **해결됨** (Phase 1, dns_sd_configs 적용. 2026-09-11 replica 3개 모두 UP 확인, docs/02 ISSUE-2)
 - Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
