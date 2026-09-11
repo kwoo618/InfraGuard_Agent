@@ -37,9 +37,11 @@ from app.schemas import LoadTestResult
 
 logger = logging.getLogger(__name__)
 
-# CLAUDE.md 가드레일: "Locust 부하 상한 50 TPS" — 로컬 PC 한 대에서
+# CLAUDE.md 가드레일: Locust 동시 가상 사용자 상한 50 — 로컬 PC 한 대에서
 # Locust + target-server + Prometheus + 백엔드를 동시에 돌리기 때문에
-# CPU가 고갈되지 않도록 가상 사용자 수(≈TPS) 상한을 둔다.
+# CPU가 고갈되지 않도록 동시 가상 사용자 수(--users)의 상한을 둔다.
+# 처리량(TPS) 상한이 아니다. 측정 TPS는 이 값을 넘을 수 있다 (docs/02 ISSUE-11).
+# 이름(MAX_TPS)은 기존 코드·테스트 호환을 위해 그대로 둔다.
 MAX_TPS = 50
 
 # 이 파일(backend/app/tools/run_load_test.py)을 기준으로 프로젝트 루트를 계산한다.
@@ -88,10 +90,10 @@ def run_load_test(
     """Locust 부하 테스트를 실행하고 결과를 LoadTestResult로 반환한다.
 
     Args:
-        target_tps: 목표 TPS(=가상 사용자 수로 근사). MAX_TPS를 넘을 수 없다.
-            locustfile.py의 wait_time(0.1~0.5초)을 기준으로 설계했기 때문에
-            "가상 사용자 1명 ≈ 초당 요청 1~2건" 정도로 근사된다. 정확한 TPS는
-            Locust가 직접 측정한 값(결과의 tps 필드)을 신뢰해야 한다.
+        target_tps: 동시 가상 사용자 수(Locust --users). 이름과 달리 처리량(TPS) 목표가 아니다
+            (docs/02 ISSUE-11). MAX_TPS를 넘을 수 없다. 초당 요청 수는 locustfile.py의
+            wait_time(0.1~0.5초)과 응답 시간에 따라 달라지므로, 처리량은 Locust가 측정한 값
+            (결과의 tps 필드)을 쓴다.
         duration: 부하 테스트 지속 시간(초). Locust의 --run-time 옵션에 그대로 전달.
         host: 부하를 받을 target-server 주소. 기본값은 DEFAULT_HOST.
         spawn_rate: 초당 추가로 생성할 가상 사용자 수(--spawn-rate).
@@ -172,7 +174,7 @@ def _run_locust(
             "--host",
             host,                  # 부하를 받을 target-server 주소
             "--users",
-            str(target_tps),       # 동시 가상 사용자 수 (target_tps로 근사)
+            str(target_tps),       # 동시 가상 사용자 수 (target_tps = --users, 처리량 목표 아님)
             "--spawn-rate",
             str(spawn_rate or target_tps),  # 초당 사용자 증가 속도
             "--run-time",

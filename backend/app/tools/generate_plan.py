@@ -87,7 +87,8 @@ def generate_optimization_plan(
     Parameters
     ----------
     target_tps:
-        사용자가 요청한 목표 TPS.
+        동시 가상 사용자 수 (Locust --users). 이름과 달리 처리량(TPS) 목표가 아니므로
+        측정 TPS와 비교하지 않는다 (docs/02_알려진이슈.md ISSUE-11, #88). 입력 검증에만 쓴다.
 
     load_test_result:
         Locust 부하 테스트 결과.
@@ -157,16 +158,10 @@ def generate_optimization_plan(
     if recommendation:
         plans.append(recommendation)
 
-    # 2. 목표 TPS 미달 대응
-    if load_test_result.tps < target_tps:
-        plans.append(
-            "현재 TPS "
-            f"{load_test_result.tps:.1f}를 "
-            f"목표 TPS {target_tps} 이상으로 "
-            "높이기 위한 병목 구간을 점검합니다."
-        )
+    # 측정 TPS를 동시 가상 사용자 수(target_tps)와 비교하는 "목표 TPS 미달" 항목은 두지 않는다.
+    # 동시 사용자 수는 처리량 목표가 아니다 (docs/02 ISSUE-11, #88).
 
-    # 3. 응답 지연 대응
+    # 2. 응답 지연 대응
     if load_test_result.latency_p95 >= 1000:
         plans.append(
             "P95 응답 시간이 "
@@ -181,7 +176,7 @@ def generate_optimization_plan(
             "줄이기 위해 요청 처리 성능을 점검합니다."
         )
 
-    # 4. 오류율 대응
+    # 3. 오류율 대응
     if load_test_result.error_rate >= 0.05:
         plans.append(
             "오류율이 "
@@ -196,7 +191,7 @@ def generate_optimization_plan(
             "원인을 확인합니다."
         )
 
-    # 5. CPU 대응
+    # 4. CPU 대응
     if system_metrics.cpu_pct >= 85:
         plans.append(
             "CPU 사용률이 "
@@ -205,7 +200,7 @@ def generate_optimization_plan(
             "요청 처리 로직을 점검합니다."
         )
 
-    # 6. 메모리 대응
+    # 5. 메모리 대응
     if system_metrics.mem_pct >= 85:
         plans.append(
             "메모리 사용률이 "
@@ -213,7 +208,7 @@ def generate_optimization_plan(
             "메모리 누수와 캐시 사용량을 점검합니다."
         )
 
-    # 7. 연결 수 대응
+    # 6. 연결 수 대응
     if system_metrics.connection_count >= 100:
         plans.append(
             "활성 연결 수가 "
@@ -221,7 +216,7 @@ def generate_optimization_plan(
             "커넥션 풀과 연결 제한 설정을 점검합니다."
         )
 
-    # 8. 스케일링 계획
+    # 7. 스케일링 계획
     if bottleneck_report.requires_scaling:
         if scaling_plan is None:
             raise PlanGenerationError(

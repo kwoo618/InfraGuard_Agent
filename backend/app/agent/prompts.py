@@ -181,7 +181,9 @@ def build_bottleneck_analysis_prompt(
     Parameters
     ----------
     target_tps:
-        사용자가 요청한 목표 TPS.
+        동시 가상 사용자 수 (run_load_test가 Locust --users로 넘기는 값).
+        이름과 달리 처리량(TPS) 목표가 아니므로 LLM에도 동시 사용자 수로 전달한다
+        (docs/02_알려진이슈.md ISSUE-11, #88).
 
     load_test_result:
         schemas.py의 LoadTestResult 객체.
@@ -234,8 +236,9 @@ def build_bottleneck_analysis_prompt(
         resource_metrics_collected
     )
 
+    # 처리량을 동시 사용자 수와 비교하는 항목은 두지 않는다 (#88).
+    # 동시 사용자 수는 부하 조건이지 처리량 목표가 아니다.
     analysis_items = [
-        "- 목표 TPS를 실제로 달성했는지",
         f"- P95 응답 시간이 SLO({slo_ms}ms)를 충족하는지, 평균 응답 시간은 어떤지",
         "- 오류율이 허용 가능한 수준인지",
     ]
@@ -258,9 +261,11 @@ def build_bottleneck_analysis_prompt(
 다음 Locust 부하 테스트 결과와 Prometheus 시스템 메트릭을
 종합적으로 분석하여 서버의 성능 병목을 진단하세요.
 
-[사용자가 요청한 목표 TPS]
+[부하 조건]
 
-{target_tps}
+동시 가상 사용자 {target_tps}명 (Locust 동시 접속 수, 처리량 목표 아님)
+처리량(TPS)은 아래 Locust 결과의 tps(측정값)입니다.
+동시 가상 사용자 수와 처리량을 비교해 달성 여부를 판단하지 마세요.
 
 [판단 기준]
 
