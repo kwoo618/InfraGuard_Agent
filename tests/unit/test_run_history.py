@@ -67,6 +67,7 @@ SCALING_PLAN = {
 
 
 def _clear_agent_storage() -> None:
+    agent.load_tests.clear()
     task_manager.states.clear()
     task_manager.futures.clear()
     task_manager.low_confidence.clear()

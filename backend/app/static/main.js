@@ -9,6 +9,7 @@ const lowConfidenceText = document.getElementById('low-confidence-text');
 const lowConfidenceAck = document.getElementById('low-confidence-ack');
 const replicaCount = document.getElementById('replica-count');
 const resetReplicasBtn = document.getElementById('reset-replicas-btn');
+const busyNote = document.getElementById('busy-note');
 
 
 
@@ -67,25 +68,47 @@ function setupLowConfidenceGate(data) {
 lowConfidenceAck.addEventListener('change', syncApproveButton);
 
 // 현재 서버 수 표시 · 1대 초기화 (측정 회차 사이 사람의 수동 조작, 결과 파일에 기록하지 않음).
-// 에이전트 실행 중(승인 대기 포함)이거나 초기화 중이면 버튼을 막는다. 서버도 409로 거부한다.
+// 동시 실행 방지 (docs/02 ISSUE-17, #87): 이 탭에서 실행 중이거나 서버가 busy이면
+// (다른 실행 진행 중·끊긴 실행의 부하 테스트 대기·초기화 중) 시작 버튼과 초기화 버튼을 막는다. 서버도 409로 거부한다.
 let agentRunning = false;
 let replicaResetting = false;
-let serverBusy = false;   // /agent/replicas의 busy (다른 탭에서 실행 중인 경우 포함)
+let serverBusy = false;          // /agent/replicas의 busy (다른 탭의 실행, 끊긴 실행의 부하 테스트 포함)
+let serverBusyReason = null;     // agent_running / load_test_running / replica_reset
+let busyPollTimer = null;
 
-function syncResetButton() {
-    resetReplicasBtn.disabled = agentRunning || replicaResetting || serverBusy;
+// 서버 busy_reason별 안내 (agent.py BUSY_MESSAGES와 같은 뜻)
+const BUSY_REASON_TEXT = {
+    agent_running: '다른 실행이 진행 중입니다(승인 대기 포함). 끝난 뒤 시작할 수 있습니다.',
+    load_test_running: '연결이 끊긴 이전 실행의 부하 테스트가 아직 돌고 있습니다. 끝나면 시작할 수 있습니다.',
+    replica_reset: '서버 수 초기화가 진행 중입니다.',
+};
+
+function busyReasonText() {
+    return BUSY_REASON_TEXT[serverBusyReason] || '지금은 새 실행을 시작할 수 없습니다.';
+}
+
+function syncControlButtons() {
+    const blocked = agentRunning || replicaResetting || serverBusy;
+    resetReplicasBtn.disabled = blocked;
+    startBtn.disabled = blocked;
+
+    // 이 탭의 실행이 아닌 이유로 막혔으면 이유를 보여준다
+    const showNote = serverBusy && !agentRunning && !replicaResetting;
+    busyNote.textContent = showNote ? `⛔ ${busyReasonText()}` : '';
+    busyNote.classList.toggle('hidden', !showNote);
 }
 
 function setAgentRunning(running) {
     const wasRunning = agentRunning;
     agentRunning = running;
-    syncResetButton();
+    syncControlButtons();
     // 실행이 끝날 때마다 실제 서버 수를 다시 읽는다
     if (wasRunning && !running) {
         refreshReplicas();
     }
 }
 
+/** 서버 수와 busy 상태를 다시 읽는다. 반환값: 서버가 새 실행을 막고 있는지 */
 async function refreshReplicas() {
     try {
         const response = await fetch('/api/v1/agent/replicas');
@@ -95,12 +118,25 @@ async function refreshReplicas() {
         const data = await response.json();
         replicaCount.textContent = typeof data.replicas === 'number' ? `${data.replicas}대` : '조회 실패';
         serverBusy = data.busy === true;
+        serverBusyReason = data.busy_reason || null;
     } catch (error) {
         console.warn('[replicas] 조회 실패:', error);
         replicaCount.textContent = '조회 실패';
         serverBusy = false;
+        serverBusyReason = null;
     }
-    syncResetButton();
+    syncControlButtons();
+
+    // 다른 실행이나 끊긴 실행의 부하 테스트가 끝나면 버튼을 다시 켜기 위해 주기적으로 확인한다
+    if (busyPollTimer) {
+        clearTimeout(busyPollTimer);
+        busyPollTimer = null;
+    }
+    if (serverBusy && !agentRunning) {
+        busyPollTimer = setTimeout(refreshReplicas, 3000);
+    }
+
+    return serverBusy;
 }
 
 resetReplicasBtn.addEventListener('click', async () => {
@@ -113,8 +149,7 @@ resetReplicasBtn.addEventListener('click', async () => {
     if (!confirmed) return;
 
     replicaResetting = true;
-    startBtn.disabled = true;
-    syncResetButton();
+    syncControlButtons();
     replicaCount.textContent = '초기화 중…';
     appendLog('서버 1대로 초기화 요청', 'system');
 
@@ -133,7 +168,6 @@ resetReplicasBtn.addEventListener('click', async () => {
         appendLog('서버 수 초기화 요청 실패', 'error');
     } finally {
         replicaResetting = false;
-        startBtn.disabled = agentRunning;
         await refreshReplicas();
     }
 });
@@ -272,8 +306,8 @@ function updateStatus(text, cls) {
     statusLabel.className = `status ${cls}`;
     statusLabel.innerHTML = text;
 
-    // 진행 중 상태(RUNNING·WAITING·SCALING)면 에이전트 실행 중으로 보고 서버 초기화 버튼을 막는다.
-    // 끝난 상태(COMPLETED·ERROR)로 바뀌면 실제 서버 수를 다시 읽는다.
+    // 진행 중 상태(RUNNING·WAITING·SCALING)면 에이전트 실행 중으로 보고 시작·서버 초기화 버튼을 막는다.
+    // 끝난 상태(COMPLETED·ERROR)로 바뀌면 실제 서버 수와 busy 상태를 다시 읽는다.
     setAgentRunning(['running', 'waiting', 'scaling'].includes(cls));
 
 }
@@ -386,7 +420,17 @@ async function fetchReport(taskId) {
 
 
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
+
+    if (startBtn.disabled) return;
+
+    // 동시 실행 방지 (docs/02 ISSUE-17, #87): 시작 전에 서버가 새 실행을 받을 수 있는지 한 번 더 확인한다.
+    // 막혀 있으면 이전 로그를 지우지 않고 이유만 남긴다. 확인과 시작 사이에 끼어든 경우는 서버가 409로 막는다.
+    startBtn.disabled = true;
+    if (await refreshReplicas()) {
+        appendLog(busyReasonText(), 'warning');
+        return;
+    }
 
     logWindow.innerHTML = "";
 
@@ -483,7 +527,7 @@ startBtn.addEventListener('click', () => {
             eventSource.close();
             startBtn.disabled = false;
         }
-        
+
         else if (data.status === 'need_approval') {
             appendLog(data.message, 'warning');
             currentTaskId = data.task_id;
@@ -528,7 +572,7 @@ startBtn.addEventListener('click', () => {
         }
 
         // agent.py가 보내는 모든 실패 케이스(인프라 다운, 부하테스트 실패,
-        // 승인 거절, scale_service 실패)는 status: 'failed'로 통일되어 온다.
+        // 승인 거절, scale_service 실패, 동시 실행 거부)는 status: 'failed'로 통일되어 온다.
         else if (data.status === 'failed') {
             hideLoadTestProgress();
 
@@ -546,8 +590,13 @@ startBtn.addEventListener('click', () => {
     eventSource.onerror = function () {
         hideLoadTestProgress();
 
-        // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
-        if (eventSource.readyState !== EventSource.CLOSED) {
+        if (!currentTaskId) {
+            // 첫 이벤트도 받기 전에 끊겼다: 서버가 새 실행을 거부했거나(409, 동시 실행 방지) 서버에 연결할 수 없다.
+            // EventSource는 응답 본문을 읽을 수 없어서 이유는 busy 상태를 다시 읽어 표시한다.
+            appendLog("실행을 시작하지 못했습니다. 다른 실행이 진행 중이거나 서버에 연결할 수 없습니다.", "error");
+            updateStatus("🔴 ERROR", "error");
+        } else if (eventSource.readyState !== EventSource.CLOSED) {
+            // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
             appendLog("[에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! docker compose up -d를 확인하세요.", "error");
             updateStatus("🔴 ERROR", "error");
         } else {
@@ -555,6 +604,7 @@ startBtn.addEventListener('click', () => {
         }
         eventSource.close();
         startBtn.disabled = false;
+        refreshReplicas();
     };
 });
 
