@@ -58,6 +58,8 @@ InfraGuard_Agent
 │   ├── locust
 │   │   ├── locustfile.py          # 부하 시나리오
 │   │   └── locust.conf            # TPS 상한 설정
+│   ├── nginx
+│   │   └── nginx.conf             # target-server 로드밸런서 (localhost:8080)
 │   ├── prometheus
 │   │   └── prometheus.yml
 │   ├── grafana
@@ -115,8 +117,13 @@ pip install -r backend/requirements.txt   # locust 포함
 ### 3. 인프라 컨테이너 기동
 
 ```bash
-docker compose up -d --build    # target-server, prometheus, grafana 등
+docker compose up -d --build    # target-server, nginx(LB), prometheus, grafana 등
 ```
+
+> 부하 대상 `http://localhost:8080`은 **nginx 로드밸런서**다. nginx가 target-server replica들로 요청을 분산하고,
+> replica는 호스트 포트를 따로 받지 않는다. 개별 replica 상태는 Prometheus의 `instance` 라벨로 확인한다.
+>
+> 호스트 포트: `8000` 백엔드/UI · `8080` nginx(부하 대상) · `9090` Prometheus · `3000` Grafana · `8090` cAdvisor
 
 ### 4. 백엔드 서버 실행
 
@@ -207,7 +214,7 @@ LANGFUSE_SECRET_KEY=    # Langfuse 트레이싱 (선택)
 LANGFUSE_PUBLIC_KEY=
 PROMETHEUS_URL=http://localhost:9090
 MAX_LOOP=10
-TARGET_SERVER_URL=http://localhost:8080
+TARGET_SERVER_URL=http://localhost:8080   # nginx 로드밸런서 → target-server replica들
 ```
 
 ---
