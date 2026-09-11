@@ -377,10 +377,8 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
         # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
         #
-        # main.js가 force_scaling=true를 매 요청마다 자동으로 보내기 때문에,
-        # DEBUG_ENDPOINTS_ENABLED가 꺼져있는(=정상적인 프로덕션/일반 사용자) 경우에도
-        # 이 분기를 매번 타게 된다. 화면에 디버그 경고를 노출하면 사용자가 오해할 수
-        # 있으므로, 꺼져있을 땐 조용히 무시하고 서버 콘솔에만 남긴다.
+        # main.js는 URL에 ?debug=1이 있을 때만 force_scaling=true를 보낸다 (Phase 4, #75).
+        # DEBUG_ENDPOINTS_ENABLED가 꺼져 있으면 요청이 와도 조용히 무시하고 서버 콘솔에만 남긴다.
         if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
             print(f"[force_scaling] 무시됨 (DEBUG_ENDPOINTS_ENABLED=false) task_id={task_id}")
 

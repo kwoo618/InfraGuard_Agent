@@ -17,9 +17,12 @@
 
         <div class="status-panel">
             <span>Agent Status</span>
-            <span id="agent-status" class="status ready">
-                🟢 READY
-            </span>
+            <div class="status-right">
+                <span id="debug-badge" class="debug-badge hidden" title="URL에 ?debug=1이 있어 force_scaling=true를 요청합니다">DEBUG · force_scaling 요청</span>
+                <span id="agent-status" class="status ready">
+                    🟢 READY
+                </span>
+            </div>
         </div>
 
         <div class="progress-timeline">
@@ -78,7 +81,7 @@
         <div class="control-panel">
 
             <div class="input-group">
-                <label for="target-tps-input">목표 TPS</label>
+                <label for="target-tps-input">동시 가상 사용자 수 <span class="input-hint">(Locust 동시 접속 사용자 · 처리량 목표 아님)</span></label>
                 <input type="number" id="target-tps-input" value="30" min="1">
             </div>
 

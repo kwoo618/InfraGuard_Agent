@@ -501,3 +501,24 @@ button:active{
 .progress-bar-fill.is-complete {
     background: linear-gradient(90deg, #3fb950, #2ea44f);
 }
+
+/* ================= 입력 힌트 · 디버그 배지 (Phase 4, #75) ================= */
+.input-hint {
+    font-size: 12px;
+    color: #6e7681;
+}
+
+.status-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.debug-badge {
+    font-size: 12px;
+    font-weight: 700;
+    color: #ffffff;
+    background: var(--accent-red);
+    border-radius: 999px;
+    padding: 3px 10px;
+}

@@ -9,6 +9,15 @@ const rejectBtn = document.getElementById('reject-btn');
 
 const statusLabel = document.getElementById("agent-status");
 
+// URL에 ?debug=1이 있으면 디버그 모드: 진단 요청에 force_scaling=true를 붙인다.
+// 발표·측정 화면에서 실수로 켜져 있지 않은지 보이도록 상태 표시줄에 배지를 띄운다.
+const DEBUG_MODE = new URLSearchParams(window.location.search).get('debug') === '1';
+
+if (DEBUG_MODE) {
+    const debugBadge = document.getElementById('debug-badge');
+    if (debugBadge) debugBadge.classList.remove('hidden');
+}
+
 
 const steps = [
     "step-load",
@@ -291,12 +300,17 @@ startBtn.addEventListener('click', () => {
         eventSource.close();
     }
 
-    // force_scaling=true는 항상 요청하지만, 실제로 힘을 쓰는지는 서버의
-    // DEBUG_ENDPOINTS_ENABLED(.env)가 결정한다. 꺼져있으면 서버가 조용히 무시하고
-    // 평소처럼 실제 LLM 판단대로 진행되므로, 매번 붙여 보내도 안전하다.
-    eventSource = new EventSource(
-        `/api/v1/agent/start?target_tps=${encodeURIComponent(targetTps)}&duration=${encodeURIComponent(duration)}&force_scaling=true`
-    );
+    // force_scaling은 URL에 ?debug=1이 있을 때만 보낸다 (디버그 전용).
+    // 예전에는 매 요청 보냈는데, 서버 DEBUG_ENDPOINTS_ENABLED가 켜진 채로 발표·측정하면
+    // LLM 판단이 덮어써질 위험이 있어서 없앴다. 실제 덮어쓰기 여부는 여전히 서버 설정이 결정한다.
+    const params = new URLSearchParams({
+        target_tps: String(targetTps),   // Locust 동시 가상 사용자 수 (처리량 목표 아님, docs/02 ISSUE-11)
+        duration: String(duration),
+    });
+    if (DEBUG_MODE) {
+        params.set('force_scaling', 'true');
+    }
+    eventSource = new EventSource(`/api/v1/agent/start?${params.toString()}`);
 
     eventSource.onmessage = function (event) {
         const data = JSON.parse(event.data);

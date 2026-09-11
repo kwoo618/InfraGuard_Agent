@@ -339,7 +339,7 @@ class RunRecorder:
             # 진단 시작 전 실제 replica 수. set_start_replicas()로 채운다
             "start_replicas": None,
             "resource_metrics_collected": RESOURCE_METRICS_COLLECTED,
-            # 요청 파라미터. main.js는 항상 true를 보내므로 실제 덮어쓰기 여부는 forced_scaling을 본다
+            # 요청 파라미터 (main.js는 ?debug=1일 때만 true). 실제 덮어쓰기 여부는 forced_scaling을 본다
             "force_scaling_requested": force_scaling_requested,
             "debug_endpoints_enabled": debug_endpoints_enabled,
             "load_target": DEFAULT_HOST,
