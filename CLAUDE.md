@@ -9,6 +9,8 @@ AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 �
 
 사후 알림이 아닌 **사전 진단 + 자율 판단 + HITL 승인** 후 실행이 핵심 가치다.
 
+Claude Code 응답 언어: 한국어
+
 ## 팀 구성
 
 - 원 개발: 대구대 부트캠프 2팀 4인 (이하은 부하 생성, 박정기 진단 에이전트, 최강우 스케일링·인프라, 최소명 API·UI)
@@ -38,6 +40,7 @@ pytest tests/unit/test_agent.py -v
 pytest tests/unit/test_metrics.py -v
 pytest tests/unit/test_prompts.py -v
 pytest tests/unit/test_api.py -v
+pytest tests/unit/test_run_history.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -70,7 +73,8 @@ InfraGuard_Agent
 │   │   │   └── generate_plan.py   # 최적화 플랜 생성
 │   │   ├── api
 │   │   │   └── v1
-│   │   │       └── agent.py       # /start /approve /report
+│   │   │       ├── agent.py       # /start /approve /report
+│   │   │       └── run_history.py # 라운드별 측정 이력 + results/ 결과 파일 저장
 │   │   ├── static                 # SSE UI + HITL 버튼
 │   │   │   ├── index.html
 │   │   │   ├── main.js
@@ -97,9 +101,11 @@ InfraGuard_Agent
 │   │   ├── test_metrics.py
 │   │   ├── test_prompts.py
 │   │   ├── test_agent.py
-│   │   └── test_api.py
+│   │   ├── test_api.py
+│   │   └── test_run_history.py
 │   └── integration
 │       └── test_e2e.py
+├── results                        # 실행 결과 JSON (gitignore). 발표 증빙은 골라서 docs/evidence/로 옮긴다
 ├── docker-compose.yml
 ├── .env.example
 ├── CLAUDE.md
@@ -246,3 +252,4 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling), 발표·측정
 - Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음 (LLM 입력에는 "측정 불가"로 표시, #78)
 - target_tps는 처리량이 아니라 Locust 동시 가상 사용자 수(`--users`)다. UI·프롬프트의 "목표 TPS" 표기가 오해를 만든다 (docs/02 ISSUE-11, 기록만)
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
+- e2e(`tests/integration/test_e2e.py`)는 LLM이 스케일링을 제안하면 실패한다. httpx `ASGITransport`가 SSE를 앱 종료까지 버퍼링해 승인 대기에서 교착한다 (docs/02 ISSUE-12, #80)
