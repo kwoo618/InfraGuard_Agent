@@ -9,14 +9,17 @@ AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 �
 
 사후 알림이 아닌 **사전 진단 + 자율 판단 + HITL 승인** 후 실행이 핵심 가치다.
 
-## 팀 역할 분담
+## 팀 구성
 
-| 팀원 | 역할 | 담당 파일 |
-|---|---|---|
-| 이하은 | 부하 생성 | `tools/run_load_test.py`, `infra/locust/` |
-| 박정기 | 진단 에이전트 | `app/agent/`, `tools/generate_plan.py` |
-| 최강우 | 스케일링 & 인프라 | `tools/get_metrics.py`, `tools/scale_service.py`, `infra/`, `docker-compose.yml` |
-| 최소명 | API & UI | `app/api/`, `app/static/`, `app/main.py` |
+- 원 개발: 대구대 부트캠프 2팀 4인 (이하은 부하 생성, 박정기 진단 에이전트, 최강우 스케일링·인프라, 최소명 API·UI)
+- 현재 (2026 우수작품경진대회 출품): 최강우, 최소명 2인
+
+| 팀원 | 역할 |
+|---|---|
+| 최강우 | 추가 개발 전체 (백엔드·에이전트·인프라·UI) |
+| 최소명 | PR 리뷰, 발표 자료 |
+
+> 파일별 소유권 규칙은 없다. 누구든 수정할 수 있으나, 인터페이스(schemas.py/state.py) 변경은 PR에 명시한다.
 
 ## 커맨드
 
@@ -29,11 +32,12 @@ pip install -r backend/requirements.txt
 # 전체 테스트
 pytest tests/
 
-# 역할별 단위 테스트
-pytest tests/unit/test_load_runner.py -v   # 이하은
-pytest tests/unit/test_agent.py -v         # 박정기
-pytest tests/unit/test_metrics.py -v       # 최강우
-pytest tests/unit/test_api.py -v           # 최소명
+# 단위 테스트
+pytest tests/unit/test_load_runner.py -v
+pytest tests/unit/test_agent.py -v
+pytest tests/unit/test_metrics.py -v
+pytest tests/unit/test_prompts.py -v
+pytest tests/unit/test_api.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -48,54 +52,55 @@ open http://localhost:9090   # Prometheus
 open http://localhost:3000   # Grafana
 ```
 
-## 파일 구조 및 소유권
+## 파일 구조
 
 ```
 InfraGuard_Agent
 ├── backend
 │   ├── app
 │   │   ├── agent
-│   │   │   ├── engine.py          # 박정기 - ReAct Loop 오케스트레이터
-│   │   │   ├── state.py           # 박정기 - Agent 런타임 상태 정의
-│   │   │   ├── prompts.py         # 박정기 - 시스템 프롬프트
-│   │   │   └── nodes.py           # 박정기 - LLM reasoning node
+│   │   │   ├── engine.py          # ReAct Loop 오케스트레이터
+│   │   │   ├── state.py           # Agent 런타임 상태 정의
+│   │   │   ├── prompts.py         # 시스템 프롬프트
+│   │   │   └── nodes.py           # LLM reasoning node
 │   │   ├── tools
-│   │   │   ├── run_load_test.py   # 이하은 - Locust 실행 + 결과 파싱
-│   │   │   ├── get_metrics.py     # 최강우 - Prometheus 쿼리
-│   │   │   ├── scale_service.py   # 최강우 - Docker replica 조정
-│   │   │   └── generate_plan.py   # 박정기 - 최적화 플랜 생성
+│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱
+│   │   │   ├── get_metrics.py     # Prometheus 쿼리
+│   │   │   ├── scale_service.py   # Docker replica 조정
+│   │   │   └── generate_plan.py   # 최적화 플랜 생성
 │   │   ├── api
 │   │   │   └── v1
-│   │   │       └── agent.py       # 최소명 - /start /approve /report
-│   │   ├── static                 # 최소명 - SSE UI + HITL 버튼
+│   │   │       └── agent.py       # /start /approve /report
+│   │   ├── static                 # SSE UI + HITL 버튼
 │   │   │   ├── index.html
 │   │   │   ├── main.js
 │   │   │   └── style.css
-│   │   └── main.py                # 최소명 - FastAPI 앱 진입점
+│   │   └── main.py                # FastAPI 앱 진입점
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── infra
 │   ├── locust
-│   │   ├── locustfile.py          # 이하은 - 부하 시나리오
-│   │   └── locust.conf            # 이하은 - 부하 기본 설정 (동시 가상 사용자 기본값 50)
+│   │   ├── locustfile.py          # 부하 시나리오
+│   │   └── locust.conf            # 부하 기본 설정 (동시 가상 사용자 기본값 50)
 │   ├── nginx
-│   │   └── nginx.conf             # 최강우 - target-server 로드밸런서 (localhost:8080)
+│   │   └── nginx.conf             # target-server 로드밸런서 (localhost:8080)
 │   ├── prometheus
-│   │   └── prometheus.yml         # 최강우
+│   │   └── prometheus.yml
 │   ├── grafana
-│   │   └── dashboard.json         # 최강우
-│   └── target-server              # 최강우 - 부하 받을 샘플 앱
+│   │   └── dashboard.json
+│   └── target-server              # 부하 받을 샘플 앱
 │       ├── main.py
 │       └── Dockerfile
 ├── tests
 │   ├── unit
-│   │   ├── test_load_runner.py    # 이하은
-│   │   ├── test_metrics.py        # 최강우
-│   │   ├── test_agent.py          # 박정기
-│   │   └── test_api.py            # 최소명
+│   │   ├── test_load_runner.py
+│   │   ├── test_metrics.py
+│   │   ├── test_prompts.py
+│   │   ├── test_agent.py
+│   │   └── test_api.py
 │   └── integration
 │       └── test_e2e.py
-├── docker-compose.yml             # 최강우
+├── docker-compose.yml
 ├── .env.example
 ├── CLAUDE.md
 ├── CONTRIBUTING.md

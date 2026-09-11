@@ -1,20 +1,21 @@
 # Contributing to InfraGuard Agent
 
 InfraGuard Agent에 기여해주셔서 감사합니다.
-이 문서는 4인 팀의 협업 규칙과 개발 절차를 설명합니다.
+이 문서는 2인 팀의 협업 규칙과 개발 절차를 설명합니다.
 
 ---
 
-## 팀 역할 분담
+## 팀 구성
 
-| 팀원 | 역할 | 담당 파일 |
-|---|---|---|
-| 이하은 | 부하 생성 | `tools/run_load_test.py`, `infra/locust/` |
-| 박정기 | 진단 에이전트 | `app/agent/`, `tools/generate_plan.py` |
-| 최강우 | 스케일링 & 인프라 | `tools/get_metrics.py`, `tools/scale_service.py`, `infra/`, `docker-compose.yml` |
-| 최소명 | API & UI | `app/api/`, `app/static/`, `app/main.py` |
+- 원 개발: 대구대 부트캠프 2팀 4인 (이하은 부하 생성, 박정기 진단 에이전트, 최강우 스케일링·인프라, 최소명 API·UI)
+- 현재 (2026 우수작품경진대회 출품): 최강우, 최소명 2인
 
-> 담당 파일 외 영역을 수정할 때는 해당 담당자에게 먼저 확인하세요.
+| 팀원 | 역할 |
+|---|---|
+| 최강우 | 추가 개발 전체 (백엔드·에이전트·인프라·UI) |
+| 최소명 | PR 리뷰, 발표 자료 |
+
+> 파일별 소유권 규칙은 없다. 누구든 수정할 수 있으나, 인터페이스(schemas.py/state.py) 변경은 PR에 명시한다.
 
 ---
 
@@ -45,12 +46,12 @@ InfraGuard Agent에 기여해주셔서 감사합니다.
 **예시**
 
 ```
-feature/12-locust-tool-runner          # 이하은
-feature/23-react-loop-engine           # 박정기
-feature/34-prometheus-metrics-tool     # 최강우
-feature/45-sse-streaming-api           # 최소명
-fix/41-locust-result-parsing-error     # 이하은
-chore/3-docker-compose-infra           # 최강우
+feature/12-locust-tool-runner
+feature/23-react-loop-engine
+feature/34-prometheus-metrics-tool
+feature/45-sse-streaming-api
+fix/41-locust-result-parsing-error
+chore/3-docker-compose-infra
 ```
 
 ---
@@ -116,7 +117,7 @@ closes #
 - [ ] 불필요한 코드(print, 임시 주석 등)를 제거했다
 - [ ] MAX_LOOP, 타임아웃 등 가드레일이 유지된다
 - [ ] HITL 지점(스케일링 실행 전 승인)이 우회되지 않는다
-- [ ] 담당 파일 외 영역 수정 시 해당 담당자에게 확인했다
+- [ ] 인터페이스(schemas.py/state.py) 변경 시 PR 본문에 명시했다
 ```
 
 ---
@@ -125,8 +126,8 @@ closes #
 
 ```bash
 # 저장소 클론
-git clone https://github.com/jogeulling/UpStage_Project.git
-cd UpStage_Project
+git clone https://github.com/kwoo618/InfraGuard_Agent.git
+cd InfraGuard_Agent
 
 # Python 의존성 설치
 pip install -r backend/requirements.txt
@@ -167,10 +168,10 @@ refactor: AgentState dataclass 구조 개선
 
 ## 인터페이스 계약 (Interface Contract)
 
-역할 간 데이터를 주고받는 구조체입니다. **변경 시 반드시 전체 팀에 공유하세요.**
+모듈 간 데이터를 주고받는 구조체입니다. **변경 시 반드시 PR 본문에 명시하세요.**
 
 ```python
-# 이하은 → 박정기
+# tools/run_load_test → agent
 @dataclass
 class LoadTestResult:
     tps: float
@@ -178,7 +179,7 @@ class LoadTestResult:
     error_rate: float    # 0.0 ~ 1.0
     duration: int        # 초
 
-# 최강우 → 박정기
+# tools/get_metrics → agent
 @dataclass
 class SystemMetrics:
     cpu_pct: float
@@ -186,7 +187,7 @@ class SystemMetrics:
     connection_count: int
     timestamp: str
 
-# 박정기 → 최소명
+# agent → api
 @dataclass
 class BottleneckReport:
     cause: str
@@ -194,7 +195,7 @@ class BottleneckReport:
     recommendation: str
     confidence: float    # 0.0 ~ 1.0
 
-# 최강우 → 최소명
+# tools/scale_service → api
 @dataclass
 class ScalingResult:
     before_replicas: int
