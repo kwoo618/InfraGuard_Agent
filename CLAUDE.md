@@ -42,6 +42,7 @@ pytest tests/unit/test_prompts.py -v
 pytest tests/unit/test_api.py -v
 pytest tests/unit/test_run_history.py -v
 pytest tests/unit/test_replica_reset.py -v
+pytest tests/unit/test_run_gate.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -68,7 +69,7 @@ InfraGuard_Agent
 │   │   │   ├── prompts.py         # 시스템 프롬프트
 │   │   │   └── nodes.py           # LLM reasoning node
 │   │   ├── tools
-│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱 (+ 그래프용 초 단위 시계열·엔드포인트 통계)
+│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱 (헤드라인은 종료 시 통계, + 그래프용 초 단위 시계열·엔드포인트 통계)
 │   │   │   ├── get_metrics.py     # Prometheus 쿼리 (활성 연결 수, 서버별 요청 수)
 │   │   │   ├── scale_service.py   # Docker replica 조정
 │   │   │   └── generate_plan.py   # 최적화 플랜 생성
@@ -87,7 +88,7 @@ InfraGuard_Agent
 │   └── requirements.txt
 ├── infra
 │   ├── locust
-│   │   ├── locustfile.py          # 부하 시나리오 + 요청별 원시 기록 훅 (--csv prefix 옆 _requests.csv)
+│   │   ├── locustfile.py          # 부하 시나리오 + 요청별 원시 기록 훅 (--csv prefix 옆 _requests.csv) + 종료 시 통계 (_final_stats.json, #85)
 │   │   └── locust.conf            # 부하 기본 설정 (동시 가상 사용자 기본값 50)
 │   ├── nginx
 │   │   └── nginx.conf             # target-server 로드밸런서 (localhost:8080)
@@ -106,7 +107,8 @@ InfraGuard_Agent
 │   │   ├── test_agent.py
 │   │   ├── test_api.py
 │   │   ├── test_run_history.py
-│   │   └── test_replica_reset.py
+│   │   ├── test_replica_reset.py
+│   │   └── test_run_gate.py       # 동시 실행 방지 (#87)
 │   └── integration
 │       └── test_e2e.py
 ├── results                        # 실행 결과 JSON (gitignore). 발표 증빙은 골라서 docs/evidence/로 옮긴다
@@ -182,11 +184,11 @@ class AgentRuntimeState(TypedDict):
 
 | 메서드 | 경로 | 담당 | 설명 |
 |---|---|---|---|
-| GET | `/api/v1/agent/start` | 최소명 | TPS(동시 가상 사용자 수)·duration 수신, 에이전트 루프 시작, SSE 스트리밍 (EventSource라 GET. 코드 기준으로 정정) |
+| GET | `/api/v1/agent/start` | 최소명 | TPS(동시 가상 사용자 수)·duration 수신, 에이전트 루프 시작, SSE 스트리밍 (EventSource라 GET. 코드 기준으로 정정). 다른 실행(승인 대기 포함)·끊긴 실행의 부하 테스트·서버 수 초기화가 진행 중이면 409 (#87) |
 | POST | `/api/v1/agent/approve` | 최소명 | HITL 스케일링 승인. 저신뢰 제안은 `acknowledge_low_confidence=true` 필요 (#83) |
 | GET | `/api/v1/agent/report/{task_id}` | 최소명 | 최종 종합 분석 리포트 반환. Phase 3·4에서 필드 추가 (기존 필드 유지) |
-| GET | `/api/v1/agent/replicas` | 최강우 | 현재 target-server replica 수(docker compose 실제 값)와 실행 중 여부 |
-| POST | `/api/v1/agent/replicas/reset` | 최강우 | 측정 회차 사이 1대 초기화. 에이전트 실행·승인 대기 중이면 409. results/에 기록하지 않음 |
+| GET | `/api/v1/agent/replicas` | 최강우 | 현재 target-server replica 수(docker compose 실제 값)와 실행 중 여부 `busy`, 이유 `busy_reason`(`agent_running` / `load_test_running` / `replica_reset`, #87) |
+| POST | `/api/v1/agent/replicas/reset` | 최강우 | 측정 회차 사이 1대 초기화. 에이전트 실행·승인 대기 중이거나 끝나지 않은 부하 테스트가 있으면 409. results/에 기록하지 않음 |
 
 ## HITL(Human-In-The-Loop) 지점
 
@@ -247,6 +249,7 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling, UI는 ?debug=1�
 작업 전 반드시 `docs/00_작업가이드.md`와 해당 작업 문서를 먼저 읽는다.
 측정하지 않은 수치를 코드·UI·문서에 넣지 않는다. 가드레일 값 변경 금지.
 문서와 코드가 다르면 코드가 기준이며, 차이를 보고한다.
+발표 수치는 `docs/04_발표용측정결과.md`(증빙 `docs/evidence/`)만 쓴다. 측정 정확성 수정(#85 #87 #88) 전 측정과 합치지 않는다.
 
 ### 절대 원칙
 - 측정하지 않은 수치를 코드·UI·문서에 하드코딩하거나 예시값을 실측처럼 표시하지 않는다.
@@ -260,9 +263,9 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling, UI는 ?debug=1�
 - ~~LLM 진단 입력에 CPU/메모리 0% 고정값이 측정값처럼 들어가고 P95 판단 기준이 없음~~ → **해결됨** (#78, 미수집 항목 "측정 불가" 표시 + `P95_SLO_MS` 기본 1000ms. 2026-09-11 5회 모두 CPU/메모리를 근거에서 제외·SLO 언급 확인, target_tps 50 3회 중 2회 스케일링 제안, docs/02 ISSUE-10)
 - ~~신뢰도 0.6 미만 HITL이 설계 문서에만 있고 코드에 없음~~ → **해결됨** (#83, 승인 전 확인 게이트 + `/approve` 400. 단위 테스트로 검증, 실측 confidence는 80~95%라 UI 수동 검증 없음, docs/02 ISSUE-13)
 - Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음 (LLM 입력에는 "측정 불가"로 표시, #78)
-- target_tps는 처리량이 아니라 Locust 동시 가상 사용자 수(`--users`)다. UI 입력 라벨과 결과 패널은 "동시 가상 사용자 수"로 바꿨다(Phase 4). LLM 프롬프트의 "목표 TPS" 표기는 그대로다 (docs/02 ISSUE-11)
+- ~~LLM 프롬프트가 target_tps(동시 가상 사용자 수)를 "목표 TPS"로 표기해 LLM이 처리량 목표로 읽음~~ → **해결됨** (#88, 프롬프트 "동시 가상 사용자 {n}명 (Locust 동시 접속 수, 처리량 목표 아님)", "목표 TPS 달성" 분석 항목·조치 제거. API 파라미터 이름 `target_tps`는 유지. 2026-09-12 발표용 측정 결과 파일에 "목표 TPS"·"미달" 문구 없음, docs/02 ISSUE-11)
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
 - e2e(`tests/integration/test_e2e.py`)는 LLM이 스케일링을 제안하면 실패한다. httpx `ASGITransport`가 SSE를 앱 종료까지 버퍼링해 승인 대기에서 교착한다 (docs/02 ISSUE-12, #80)
-- 실행 중 SSE 스트림이 끊기면(탭 닫기·새로고침) Locust 서브프로세스는 끝까지 돈다. 다음 실행과 겹치면 측정이 오염된다 — 2026-09-11 실제 발생(233316 R1, 발표 수치에서 제외) (docs/02 ISSUE-5)
-- Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 LoadTestResult 헤드라인 값(total_requests 등)이 약 4~6% 적은 요청으로 계산된다. 결과 패널 초 단위 그래프는 요청별 기록이라 영향 없음 (docs/02 ISSUE-15, #85)
+- ~~실행 중 SSE 스트림이 끊기면 Locust가 끝까지 돌아 다음 실행과 겹치면 측정이 오염됨~~ → **해결됨** (#87, 실행 중·승인 대기·끊긴 실행의 부하 테스트가 남아 있으면 시작·초기화 409, UI 버튼 비활성. 끊긴 실행의 Locust는 강제로 끝내지 않고 끝날 때까지 기다린다. 2026-09-12 UI 차단 확인, 끊긴 실행 차단은 단위 테스트로만 확인, docs/02 ISSUE-17)
+- ~~Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 헤드라인 값이 적은 요청으로 계산됨~~ → **해결됨** (#85, locustfile이 종료 시 통계 `_final_stats.json`을 쓰고 헤드라인을 여기서 계산, 결과 파일에 `headline_source` 기록. 2026-09-12 발표용 측정 레코드 11개 모두 ① 초별 합 = 엔드포인트 합 = total_requests, docs/02 ISSUE-15)
 - run_load_test가 Locust 출력을 cp949로 읽어 연결 불가 시 stderr가 사라지고, 같은 조건에서 요청 0건 LoadTestResult를 정상 반환한다 (docs/02 ISSUE-16, #84)
