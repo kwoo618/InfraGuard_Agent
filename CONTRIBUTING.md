@@ -92,7 +92,7 @@ SSE 스트리밍 엔드포인트 구현
 
 ### merge 전략
 
-- 모든 브랜치 → main: **Squash merge** (커밋 히스토리 정리)
+- 모든 브랜치 → main: **Merge commit** (GitHub "Create a merge commit"). 브랜치의 이슈별 커밋을 main 히스토리에 그대로 남깁니다.
 
 ### PR 체크리스트
 

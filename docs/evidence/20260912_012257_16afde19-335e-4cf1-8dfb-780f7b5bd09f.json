@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "task_id": "16afde19-335e-4cf1-8dfb-780f7b5bd09f",
+  "started_at": "2026-09-12T01:22:57.513086+09:00",
+  "ended_at": "2026-09-12T01:23:37.210677+09:00",
+  "conditions": {
+    "virtual_users": 5,
+    "duration_sec": 30,
+    "p95_slo_ms": 1000,
+    "llm_model": "solar-pro2",
+    "start_replicas": 1,
+    "resource_metrics_collected": false,
+    "force_scaling_requested": false,
+    "debug_endpoints_enabled": false,
+    "load_target": "http://localhost:8080",
+    "locust_task_weights": {
+      "/light": 6,
+      "/heavy": 3,
+      "/flaky": 1,
+      "/health": 1
+    },
+    "environment": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "python": "3.13.14",
+      "cpu_count": 12,
+      "code_version": "827630a",
+      "code_dirty": false
+    }
+  },
+  "forced_scaling": false,
+  "measurement_history": [
+    {
+      "round": 1,
+      "phase": "initial",
+      "replicas": 1,
+      "virtual_users": 5,
+      "duration": 30,
+      "tps": 11.542311188602795,
+      "latency_p95": 540.0,
+      "latency_avg": 121.86063040842367,
+      "error_rate": 0.0029239766081871343,
+      "total_requests": 342,
+      "connection_count": 4,
+      "cpu_pct": "측정 불가",
+      "mem_pct": "측정 불가",
+      "timestamp": "2026-09-11T16:23:30.141844+00:00",
+      "timeseries": {
+        "bucket_sec": 1,
+        "source": "locust_request_log",
+        "percentile": "nearest_rank_p95",
+        "points": [
+          {
+            "t": 0,
+            "requests": 13,
+            "failures": 0,
+            "p95_ms": 545.392
+          },
+          {
+            "t": 1,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 349.796
+          },
+          {
+            "t": 2,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 433.729
+          },
+          {
+            "t": 3,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 548.199
+          },
+          {
+            "t": 4,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 437.08
+          },
+          {
+            "t": 5,
+            "requests": 15,
+            "failures": 0,
+            "p95_ms": 526.606
+          },
+          {
+            "t": 6,
+            "requests": 9,
+            "failures": 0,
+            "p95_ms": 369.17
+          },
+          {
+            "t": 7,
+            "requests": 13,
+            "failures": 0,
+            "p95_ms": 598.44
+          },
+          {
+            "t": 8,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 451.822
+          },
+          {
+            "t": 9,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 54.315
+          },
+          {
+            "t": 10,
+            "requests": 9,
+            "failures": 0,
+            "p95_ms": 486.317
+          },
+          {
+            "t": 11,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 538.661
+          },
+          {
+            "t": 12,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 415.635
+          },
+          {
+            "t": 13,
+            "requests": 7,
+            "failures": 0,
+            "p95_ms": 14.476
+          },
+          {
+            "t": 14,
+            "requests": 13,
+            "failures": 0,
+            "p95_ms": 589.374
+          },
+          {
+            "t": 15,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 573.517
+          },
+          {
+            "t": 16,
+            "requests": 13,
+            "failures": 0,
+            "p95_ms": 534.0
+          },
+          {
+            "t": 17,
+            "requests": 8,
+            "failures": 0,
+            "p95_ms": 580.998
+          },
+          {
+            "t": 18,
+            "requests": 15,
+            "failures": 1,
+            "p95_ms": 544.621
+          },
+          {
+            "t": 19,
+            "requests": 14,
+            "failures": 0,
+            "p95_ms": 528.273
+          },
+          {
+            "t": 20,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 357.568
+          },
+          {
+            "t": 21,
+            "requests": 13,
+            "failures": 0,
+            "p95_ms": 553.359
+          },
+          {
+            "t": 22,
+            "requests": 15,
+            "failures": 0,
+            "p95_ms": 254.622
+          },
+          {
+            "t": 23,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 495.696
+          },
+          {
+            "t": 24,
+            "requests": 10,
+            "failures": 0,
+            "p95_ms": 474.287
+          },
+          {
+            "t": 25,
+            "requests": 11,
+            "failures": 0,
+            "p95_ms": 500.647
+          },
+          {
+            "t": 26,
+            "requests": 8,
+            "failures": 0,
+            "p95_ms": 551.741
+          },
+          {
+            "t": 27,
+            "requests": 12,
+            "failures": 0,
+            "p95_ms": 542.34
+          },
+          {
+            "t": 28,
+            "requests": 10,
+            "failures": 0,
+            "p95_ms": 411.939
+          },
+          {
+            "t": 29,
+            "requests": 7,
+            "failures": 0,
+            "p95_ms": 553.03
+          }
+        ]
+      },
+      "endpoints": [
+        {
+          "name": "/flaky",
+          "method": "GET",
+          "requests": 29,
+          "failures": 1,
+          "error_rate": 0.034482758620689655,
+          "p95_ms": 54.0,
+          "avg_ms": 51.47395517319794,
+          "rps": 0.9787339896768452
+        },
+        {
+          "name": "/health",
+          "method": "GET",
+          "requests": 22,
+          "failures": 0,
+          "error_rate": 0.0,
+          "p95_ms": 3.0,
+          "avg_ms": 2.7749136338984086,
+          "rps": 0.7424878542376068
+        },
+        {
+          "name": "/heavy",
+          "method": "GET",
+          "requests": 89,
+          "failures": 0,
+          "error_rate": 0.0,
+          "p95_ms": 570.0,
+          "avg_ms": 418.559655054666,
+          "rps": 3.0037008648703183
+        },
+        {
+          "name": "/light",
+          "method": "GET",
+          "requests": 202,
+          "failures": 0,
+          "error_rate": 0.0,
+          "p95_ms": 15.0,
+          "avg_ms": 14.211551979441186,
+          "rps": 6.8173884798180255
+        }
+      ],
+      "requests_by_instance": {
+        "handlers": [
+          "/light",
+          "/heavy",
+          "/flaky"
+        ],
+        "excluded": [
+          "/health",
+          "/metrics"
+        ],
+        "counts": {
+          "172.18.0.3:8080": 323
+        }
+      },
+      "headline_source": "locust_final_stats",
+      "endpoints_source": "locust_final_stats"
+    }
+  ],
+  "diagnoses": [],
+  "approvals": [],
+  "scaling_results": [],
+  "revalidations": [],
+  "user_decision": "not_applicable",
+  "outcome": {
+    "agent_outcome": "failed",
+    "end_reason": "failed",
+    "final_message": "❌ LLM 병목 분석 실패: bottleneck_report 필드가 누락되었습니다: requires_scaling",
+    "final_answer": null,
+    "error": "LLM 병목 분석 실패: bottleneck_report 필드가 누락되었습니다: requires_scaling",
+    "loop_count": 1,
+    "scaling_count": 0,
+    "optimization_plan": []
+  }
+}
