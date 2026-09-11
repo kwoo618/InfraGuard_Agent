@@ -33,6 +33,8 @@ htmlcov/
 # ===== Locust =====
 infra/locust/*.csv
 infra/locust/*_stats*.html
+# locustfile 종료 시 통계 (locust.conf의 csv = result로 수동 실행하면 생긴다, #85)
+infra/locust/*_final_stats.json
 
 # ===== Prometheus / Grafana 로컬 데이터 =====
 infra/prometheus/data/

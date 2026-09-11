@@ -768,6 +768,11 @@ class RunRecorder:
             "endpoints": details.get("endpoints"),
             # 부하 뒤 늦게 도착하면 set_instance_requests()가 채운다
             "requests_by_instance": details.get("requests_by_instance"),
+            # 위 tps·latency_*·error_rate·total_requests와 endpoints의 계산 출처 (#85, docs/02 ISSUE-15).
+            # locust_final_stats = Locust 종료 시 통계(부하 전체 요청), locust_stats_csv = _stats.csv(마지막 약 1초 누락 가능).
+            # 그래프 데이터를 모으지 않은 측정이면 null
+            "headline_source": details.get("headline_source"),
+            "endpoints_source": details.get("endpoints_source"),
         }
 
         if entry is not None:

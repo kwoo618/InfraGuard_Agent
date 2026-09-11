@@ -5,9 +5,10 @@ CONTRIBUTING.md 테스트 규칙에 따라 실제 Locust 프로세스를 띄우�
 subprocess.Popen을 Mock 처리한다 (CPU/시간 비용이 큰 실제 부하 테스트를
 CI에서 매번 돌릴 수 없기 때문).
 
-아래 CSV·요청 기록의 수치는 테스트 입력값이며 측정값이 아니다.
+아래 CSV·요청 기록·종료 시 통계의 수치는 테스트 입력값이며 측정값이 아니다.
 """
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,8 @@ import pytest
 from app.schemas import LoadTestResult
 from app.tools.run_load_test import (
     MAX_TPS,
+    SOURCE_FINAL_STATS,
+    SOURCE_STATS_CSV,
     LoadTestError,
     nearest_rank_percentile,
     run_load_test,
@@ -45,6 +48,7 @@ def _request_log(start: float = 1000.0) -> str:
     구간 1초: 3건 중 1건 실패
     구간 2초: 요청 없음
     구간 3초: 1건
+    합계 24건 (/light 21, /heavy 1, /flaky 1 실패, /health 1)
     """
     lines = ["event,time,name,response_time_ms,failed", f"start,{start:.6f},,,"]
 
@@ -60,11 +64,39 @@ def _request_log(start: float = 1000.0) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _entry(name, method, num_requests, num_failures, avg, rps, p95):
+    return {
+        "name": name,
+        "method": method,
+        "num_requests": num_requests,
+        "num_failures": num_failures,
+        "avg_response_time": avg,
+        "total_rps": rps,
+        "p95_response_time": p95,
+    }
+
+
+# locustfile.py _write_final_stats가 쓰는 형식의 종료 시 통계.
+# _request_log()와 같은 24건이다. _stats.csv(STATS_CSV)는 이보다 오래된 스냅샷을 흉내 낸다.
+FINAL_STATS = {
+    "source": "locust_runner_stats",
+    "written_at": 1004.0,
+    "aggregated": _entry("Aggregated", None, 24, 1, 1060.0, 6.0, 1900),
+    "entries": [
+        _entry("/flaky", "GET", 1, 1, 50.0, 0.25, 50),
+        _entry("/health", "GET", 1, 0, 5.0, 0.25, 5),
+        _entry("/heavy", "GET", 1, 0, 300.0, 0.25, 300),
+        _entry("/light", "GET", 21, 0, 1000.5, 5.25, 1900),
+    ],
+}
+
+
 def _fake_popen_factory(
     tmp_path: Path,
     returncode: int = 0,
     write_csv: bool = True,
     requests_log: str | None = None,
+    final_stats: str | None = None,
 ):
     """subprocess.Popen을 대체할 Mock 팩토리 함수를 만든다.
 
@@ -83,6 +115,7 @@ def _fake_popen_factory(
         write_csv: False면 stats CSV를 일부러 쓰지 않아, "결과 파일을 찾을 수 없음"
             에러 경로를 재현한다.
         requests_log: 주면 locustfile 훅처럼 <prefix>_requests.csv에 이 내용을 쓴다.
+        final_stats: 주면 locustfile 훅처럼 <prefix>_final_stats.json에 이 내용을 쓴다.
     """
 
     def _popen(cmd, cwd=None, stdout=None, stderr=None, text=None):
@@ -102,6 +135,8 @@ def _fake_popen_factory(
                 Path(f"{csv_prefix}_stats.csv").write_text(STATS_CSV, encoding="utf-8")
             if requests_log is not None:
                 Path(f"{csv_prefix}_requests.csv").write_text(requests_log, encoding="utf-8")
+            if final_stats is not None:
+                Path(f"{csv_prefix}_final_stats.json").write_text(final_stats, encoding="utf-8")
             # subprocess.Popen.communicate()는 (stdout, stderr) 튜플을 반환한다.
             return ("", "" if returncode == 0 else "boom")
 
@@ -199,7 +234,7 @@ def test_detailed_returns_same_result_with_timeseries_and_endpoints(tmp_path):
     ):
         result, details = run_load_test_detailed(target_tps=10, duration=5)
 
-    # LoadTestResult는 run_load_test와 같다
+    # 종료 시 통계가 없으면 LoadTestResult는 run_load_test와 같은 _stats.csv 값이다
     assert result == LoadTestResult(
         tps=30.0,
         latency_p95=95.0,
@@ -208,6 +243,8 @@ def test_detailed_returns_same_result_with_timeseries_and_endpoints(tmp_path):
         duration=5,
         total_requests=900,
     )
+    assert details["headline_source"] == SOURCE_STATS_CSV
+    assert details["endpoints_source"] == SOURCE_STATS_CSV
 
     timeseries = details["timeseries"]
 
@@ -284,3 +321,97 @@ def test_detailed_with_start_only_log_gives_null_timeseries(tmp_path):
         _, details = run_load_test_detailed(target_tps=10, duration=5)
 
     assert details["timeseries"] is None
+
+
+# ----------------------------------------------------------------------
+# 헤드라인 값의 출처 — Locust 종료 시 통계 (#85, docs/02 ISSUE-15)
+# ----------------------------------------------------------------------
+
+
+def test_headline_uses_final_stats_when_available(tmp_path):
+    """종료 시 통계가 있으면 오래된 _stats.csv 스냅샷(900건)이 아니라 최종값을 쓴다."""
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, final_stats=json.dumps(FINAL_STATS)),
+    ):
+        result = run_load_test(target_tps=10, duration=5)
+
+    assert result == LoadTestResult(
+        tps=6.0,
+        latency_p95=1900.0,
+        latency_avg=1060.0,
+        error_rate=1 / 24,
+        duration=5,
+        total_requests=24,
+    )
+
+
+def test_detailed_headline_total_matches_timeseries_sum(tmp_path):
+    """
+    그래프 ①(요청별 기록)의 초별 요청 수 합과 헤드라인 total_requests가 같다.
+    두 값 모두 Locust의 같은 request 이벤트를 전부 센 값이기 때문이다 (#85).
+    """
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(
+            tmp_path,
+            requests_log=_request_log(),
+            final_stats=json.dumps(FINAL_STATS),
+        ),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    points = details["timeseries"]["points"]
+
+    assert result.total_requests == sum(point["requests"] for point in points) == 24
+    assert round(result.error_rate * result.total_requests) == sum(point["failures"] for point in points) == 1
+    assert details["headline_source"] == SOURCE_FINAL_STATS
+
+    # 엔드포인트 통계도 종료 시 통계에서 온다 (합계가 헤드라인과 같다)
+    assert details["endpoints_source"] == SOURCE_FINAL_STATS
+    assert [endpoint["name"] for endpoint in details["endpoints"]] == ["/flaky", "/health", "/heavy", "/light"]
+    assert sum(endpoint["requests"] for endpoint in details["endpoints"]) == 24
+    assert details["endpoints"][0] == {
+        "name": "/flaky",
+        "method": "GET",
+        "requests": 1,
+        "failures": 1,
+        "error_rate": 1.0,
+        "p95_ms": 50.0,
+        "avg_ms": 50.0,
+        "rps": 0.25,
+    }
+
+
+def test_broken_final_stats_falls_back_to_csv(tmp_path):
+    """종료 시 통계가 깨져 있으면 예외 없이 _stats.csv로 계산하고 출처를 그렇게 남긴다."""
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, final_stats="{not json"),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    assert result.total_requests == 900
+    assert details["headline_source"] == SOURCE_STATS_CSV
+    assert details["endpoints_source"] == SOURCE_STATS_CSV
+
+
+def test_final_stats_without_requests_matches_csv_rules(tmp_path):
+    """요청 0건이면 P95는 None → 0.0, 에러율 0.0 (_stats.csv의 N/A 처리와 같은 규칙)."""
+    empty = {
+        "source": "locust_runner_stats",
+        "aggregated": _entry("Aggregated", None, 0, 0, 0.0, 0.0, None),
+        "entries": [],
+    }
+
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, final_stats=json.dumps(empty)),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    assert result.total_requests == 0
+    assert result.latency_p95 == 0.0
+    assert result.error_rate == 0.0
+    assert details["headline_source"] == SOURCE_FINAL_STATS
+    assert details["endpoints"] == []

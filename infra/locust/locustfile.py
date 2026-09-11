@@ -12,6 +12,8 @@ DB connection pool을 흉내내는 /heavy로 몰리도록 가중치를 둬서
 """
 
 import csv
+import json
+import os
 import time
 
 from locust import HttpUser, between, events, task
@@ -24,18 +26,33 @@ from locust import HttpUser, between, events, task
 # 요청이 끝날 때마다 완료 시각·응답시간·실패 여부를 기록한다.
 #
 # 파일 위치는 --csv prefix 옆(<prefix>_requests.csv)이다. run_load_test.py가 이미 --csv를
-# 넘기므로 Locust 명령 인자는 바뀌지 않는다. --csv 없이 실행하면(웹 UI 수동 실행) 기록하지 않는다.
+# 넘기므로 Locust 명령 인자는 바뀌지 않는다. csv prefix가 없으면 기록하지 않는다.
+# (infra/locust에서 수동 실행하면 locust.conf의 `csv = result` 때문에 result_requests.csv가 생긴다)
 # 부하 시나리오(가중치, wait_time)에는 영향이 없다.
 # ---------------------------------------------------------------------
 REQUEST_LOG_SUFFIX = "_requests.csv"
 
+# ---------------------------------------------------------------------
+# 종료 시 통계 (LoadTestResult 헤드라인 값용, #85, docs/02 ISSUE-15)
+#
+# Locust는 _stats.csv를 1초마다 다시 쓰고 종료할 때는 파일을 닫기만 한다. 그래서 _stats.csv에는
+# 부하 마지막 약 1초의 요청이 빠진다. 부하가 멈춘 뒤(test_stop, quitting) runner.stats의 최종값을
+# <prefix>_final_stats.json에 쓴다. 값은 _stats.csv의 Aggregated·엔드포인트 행과 같은 계산이다
+# (num_requests, num_failures, avg_response_time, total_rps, get_response_time_percentile(0.95)).
+# ---------------------------------------------------------------------
+FINAL_STATS_SUFFIX = "_final_stats.json"
+
 _request_log = {"file": None, "writer": None}
+
+
+def _csv_prefix(environment):
+    options = environment.parsed_options
+    return getattr(options, "csv_prefix", None) if options is not None else None
 
 
 @events.test_start.add_listener
 def _open_request_log(environment, **kwargs):
-    options = environment.parsed_options
-    prefix = getattr(options, "csv_prefix", None) if options is not None else None
+    prefix = _csv_prefix(environment)
 
     if not prefix:
         return
@@ -76,15 +93,62 @@ def _close_request_log():
     _request_log.update(file=None, writer=None)
 
 
+def _stats_fields(entry):
+    """_stats.csv 한 행과 같은 계산의 최종값."""
+    return {
+        "name": entry.name,
+        "method": entry.method or None,
+        "num_requests": entry.num_requests,
+        "num_failures": entry.num_failures,
+        "avg_response_time": entry.avg_response_time,
+        "total_rps": entry.total_rps,
+        "p95_response_time": (
+            entry.get_response_time_percentile(0.95) if entry.num_requests else None
+        ),
+    }
+
+
+def _write_final_stats(environment):
+    prefix = _csv_prefix(environment)
+    runner = environment.runner
+
+    if not prefix or runner is None:
+        return
+
+    stats = runner.stats
+    data = {
+        "source": "locust_runner_stats",
+        "written_at": time.time(),
+        "aggregated": _stats_fields(stats.total),
+        # _stats.csv와 같은 순서 (이름, 메서드)
+        "entries": [
+            _stats_fields(entry)
+            for entry in sorted(stats.entries.values(), key=lambda item: (item.name, item.method or ""))
+        ],
+    }
+
+    # 부분 파일이 남지 않게 임시 파일에 쓴 뒤 바꾼다. 실패하면 run_load_test.py가 _stats.csv로 대신 계산하고
+    # 결과 파일에 그 출처(locust_stats_csv)를 남긴다. 부하 테스트 자체는 멈추지 않는다.
+    try:
+        tmp_path = f"{prefix}{FINAL_STATS_SUFFIX}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp_path, f"{prefix}{FINAL_STATS_SUFFIX}")
+    except Exception:
+        pass
+
+
 @events.test_stop.add_listener
 def _on_test_stop(environment, **kwargs):
     _close_request_log()
+    _write_final_stats(environment)
 
 
 @events.quitting.add_listener
 def _on_quitting(environment, **kwargs):
-    # test_stop이 오지 않은 종료에서도 버퍼를 비우고 닫는다
+    # test_stop이 오지 않은 종료에서도 버퍼를 비우고 닫는다. 종료 시 통계도 최종값으로 한 번 더 쓴다
     _close_request_log()
+    _write_final_stats(environment)
 
 
 class TargetServerUser(HttpUser):
