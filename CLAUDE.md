@@ -214,7 +214,7 @@ HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병
 
 - 모델: **Solar Pro** (Upstage)
 - Tool Use 방식: ReAct Loop (Thought → Action → Observation 반복)
-- 관측성: **Langfuse** 트레이싱 — 모든 LLM 호출 추적
+- 관측성: **Langfuse** 트레이싱 — 설계 목표. 2026-09-12 기준 코드 연동 없음 (`requirements.txt`·`.env.example`에만 있고 `backend/app`에서 쓰지 않는다, docs/02 ISSUE-18)
 - 평가: **LLM-as-Judge** — 최종 병목 진단 리포트 정확성 정량 검증
 
 ## 환경변수 (.env)
@@ -267,5 +267,6 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling, UI는 ?debug=1�
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
 - e2e(`tests/integration/test_e2e.py`)는 LLM이 스케일링을 제안하면 실패한다. httpx `ASGITransport`가 SSE를 앱 종료까지 버퍼링해 승인 대기에서 교착한다 (docs/02 ISSUE-12, #80)
 - ~~실행 중 SSE 스트림이 끊기면 Locust가 끝까지 돌아 다음 실행과 겹치면 측정이 오염됨~~ → **해결됨** (#87, 실행 중·승인 대기·끊긴 실행의 부하 테스트가 남아 있으면 시작·초기화 409, UI 버튼 비활성. 끊긴 실행의 Locust는 강제로 끝내지 않고 끝날 때까지 기다린다. 2026-09-12 UI 차단 확인, 끊긴 실행 차단은 단위 테스트로만 확인, docs/02 ISSUE-17)
-- ~~Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 헤드라인 값이 적은 요청으로 계산됨~~ → **해결됨** (#85, locustfile이 종료 시 통계 `_final_stats.json`을 쓰고 헤드라인을 여기서 계산, 결과 파일에 `headline_source` 기록. 2026-09-12 발표용 측정 레코드 11개 모두 ① 초별 합 = 엔드포인트 합 = total_requests, docs/02 ISSUE-15)
+- ~~Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 헤드라인 값이 적은 요청으로 계산됨~~ → **해결됨** (#85, locustfile이 종료 시 통계 `_final_stats.json`을 쓰고 헤드라인을 여기서 계산, 결과 파일에 `headline_source` 기록. 2026-09-12 발표용 측정 레코드 13개 모두 ① 초별 합 = 엔드포인트 합 = total_requests, docs/02 ISSUE-15)
 - run_load_test가 Locust 출력을 cp949로 읽어 연결 불가 시 stderr가 사라지고, 같은 조건에서 요청 0건 LoadTestResult를 정상 반환한다 (docs/02 ISSUE-16, #84)
+- LLM 진단 응답에 필수 필드(`requires_scaling` 등)가 빠지면 추측하지 않고 실행을 실패로 끝낸다(설계대로). 진단 응답 원문은 결과 파일·로그에 남지 않고 재시도도 없다 — 2026-09-12 발표용 측정 5명 2회 중 1회 실측. 재시도·원문 보존은 대회 이후 과제 (docs/02 ISSUE-18)
