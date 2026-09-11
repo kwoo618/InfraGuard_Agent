@@ -43,6 +43,7 @@ pytest tests/unit/test_api.py -v
 pytest tests/unit/test_run_history.py -v
 pytest tests/unit/test_replica_reset.py -v
 pytest tests/unit/test_run_gate.py -v
+pytest tests/unit/test_grafana_config.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -95,9 +96,13 @@ InfraGuard_Agent
 │   ├── prometheus
 │   │   └── prometheus.yml
 │   ├── grafana
-│   │   └── dashboard.json
+│   │   ├── dashboard.json         # 대시보드 원본 (홈 대시보드, 익명 보기 전용)
+│   │   └── provisioning           # 데이터소스(uid "prometheus")·대시보드 자동 로드 (#74)
+│   │       ├── datasources/prometheus.yml
+│   │       └── dashboards/infraguard.yml
 │   └── target-server              # 부하 받을 샘플 앱
-│       ├── main.py
+│       ├── main.py                # latency 히스토그램 버킷 LATENCY_BUCKETS (#74)
+│       ├── requirements.txt       # 재빌드 재현용 버전 고정 (#74)
 │       └── Dockerfile
 ├── tests
 │   ├── unit
@@ -108,7 +113,8 @@ InfraGuard_Agent
 │   │   ├── test_api.py
 │   │   ├── test_run_history.py
 │   │   ├── test_replica_reset.py
-│   │   └── test_run_gate.py       # 동시 실행 방지 (#87)
+│   │   ├── test_run_gate.py       # 동시 실행 방지 (#87)
+│   │   └── test_grafana_config.py # Grafana 설정·버킷 일관성 (#74)
 │   └── integration
 │       └── test_e2e.py
 ├── results                        # 실행 결과 JSON (gitignore). 발표 증빙은 골라서 docs/evidence/로 옮긴다
@@ -262,9 +268,9 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling, UI는 ?debug=1�
 - ~~스케일 아웃해도 부하가 replica 1개로만 감 / 재생성 후 호스트 8080이 비어 부하 대상이 사라짐~~ → **해결됨** (Phase 2, nginx 로드밸런서가 호스트 8080 고정, target-server replica는 호스트 포트 없음. 2026-09-11 replica 3개 균등 분산·재생성 후 8080 유지 확인, docs/02 ISSUE-1·9)
 - ~~LLM 진단 입력에 CPU/메모리 0% 고정값이 측정값처럼 들어가고 P95 판단 기준이 없음~~ → **해결됨** (#78, 미수집 항목 "측정 불가" 표시 + `P95_SLO_MS` 기본 1000ms. 2026-09-11 5회 모두 CPU/메모리를 근거에서 제외·SLO 언급 확인, target_tps 50 3회 중 2회 스케일링 제안, docs/02 ISSUE-10)
 - ~~신뢰도 0.6 미만 HITL이 설계 문서에만 있고 코드에 없음~~ → **해결됨** (#83, 승인 전 확인 게이트 + `/approve` 400. 단위 테스트로 검증, 실측 confidence는 80~95%라 UI 수동 검증 없음, docs/02 ISSUE-13)
-- Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음 (LLM 입력에는 "측정 불가"로 표시, #78)
-- ~~LLM 프롬프트가 target_tps(동시 가상 사용자 수)를 "목표 TPS"로 표기해 LLM이 처리량 목표로 읽음~~ → **해결됨** (#88, 프롬프트 "동시 가상 사용자 {n}명 (Locust 동시 접속 수, 처리량 목표 아님)", "목표 TPS 달성" 분석 항목·조치 제거. API 파라미터 이름 `target_tps`는 유지. 2026-09-12 발표용 측정 결과 파일에 "목표 TPS"·"미달" 문구 없음, docs/02 ISSUE-11)
-- Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
+- Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널이 비어 있었다. Grafana CPU·메모리 패널은 제거했다(Phase 5, #74). Replica 패널은 `count(up{job="target-server"} == 1)`. LLM 입력에는 "측정 불가"로 표시 (#78, docs/02 ISSUE-3)
+- ~~LLM 프롬프트가 target_tps(동시 가상 사용자 수)를 "목표 TPS"로 표기해 LLM이 처리량 목표로 읽음~~ → **해결됨** (#88, 프롬프트 "동시 가상 사용자 {n}명 (Locust 동시 접속 수, 처리량 목표 아님)", "목표 TPS 달성" 분석 항목·조치 제거. UI 입력 라벨과 결과 패널은 Phase 4에서 "동시 가상 사용자 수"로 바꿨다. API 파라미터 이름 `target_tps`는 유지. 2026-09-12 발표용 측정 결과 파일에 "목표 TPS"·"미달" 문구 없음, docs/02 ISSUE-11)
+- ~~Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)~~ → **해결됨** (Phase 5, #74. 프로비저닝 + 익명 보기 전용 + 홈 대시보드, `grafana/grafana:13.1.0` 고정. 에러율 라벨·P95 1초 상한도 수정. 2026-09-12 `down -v` 후 로그인 없이 표시, Grafana P95가 Locust P95와 버킷 해상도 범위 안, docs/02 ISSUE-4·7·8)
 - e2e(`tests/integration/test_e2e.py`)는 LLM이 스케일링을 제안하면 실패한다. httpx `ASGITransport`가 SSE를 앱 종료까지 버퍼링해 승인 대기에서 교착한다 (docs/02 ISSUE-12, #80)
 - ~~실행 중 SSE 스트림이 끊기면 Locust가 끝까지 돌아 다음 실행과 겹치면 측정이 오염됨~~ → **해결됨** (#87, 실행 중·승인 대기·끊긴 실행의 부하 테스트가 남아 있으면 시작·초기화 409, UI 버튼 비활성. 끊긴 실행의 Locust는 강제로 끝내지 않고 끝날 때까지 기다린다. 2026-09-12 UI 차단 확인, 끊긴 실행 차단은 단위 테스트로만 확인, docs/02 ISSUE-17)
 - ~~Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 헤드라인 값이 적은 요청으로 계산됨~~ → **해결됨** (#85, locustfile이 종료 시 통계 `_final_stats.json`을 쓰고 헤드라인을 여기서 계산, 결과 파일에 `headline_source` 기록. 2026-09-12 발표용 측정 레코드 13개 모두 ① 초별 합 = 엔드포인트 합 = total_requests, docs/02 ISSUE-15)
