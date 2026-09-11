@@ -4,6 +4,9 @@ const approvalModal = document.getElementById('approval-modal');
 const modalMessage = document.getElementById('modal-message');
 const approveBtn = document.getElementById('approve-btn');
 const rejectBtn = document.getElementById('reject-btn');
+const lowConfidenceBox = document.getElementById('low-confidence-box');
+const lowConfidenceText = document.getElementById('low-confidence-text');
+const lowConfidenceAck = document.getElementById('low-confidence-ack');
 
 
 
@@ -31,6 +34,35 @@ const steps = [
 
 let currentTaskId = null;
 let eventSource = null;
+
+// 저신뢰 확인 게이트 (#83): 현재 승인 요청이 신뢰도 기준 미만 스케일링 제안인지.
+// UI는 체크박스를 누르기 전까지 승인 버튼을 막고, 서버(/approve)도 확인 플래그 없는 승인을 400으로 막는다.
+let pendingLowConfidence = false;
+
+function syncApproveButton() {
+    approveBtn.disabled = pendingLowConfidence && !lowConfidenceAck.checked;
+}
+
+function setupLowConfidenceGate(data) {
+    pendingLowConfidence = data.low_confidence === true;
+    lowConfidenceAck.checked = false;
+
+    if (pendingLowConfidence) {
+        const confidence = fmtConfidence(data.confidence);   // result_panel.js
+        const threshold = typeof data.low_confidence_threshold === 'number'
+            ? `${Math.round(data.low_confidence_threshold * 100)}%`
+            : '';
+        lowConfidenceText.textContent = `⚠ AI 신뢰도 ${confidence} — 기준 ${threshold} 미만`;
+        lowConfidenceBox.classList.remove('hidden');
+    } else {
+        lowConfidenceText.textContent = '';
+        lowConfidenceBox.classList.add('hidden');
+    }
+
+    syncApproveButton();
+}
+
+lowConfidenceAck.addEventListener('change', syncApproveButton);
 
 // 부하 테스트 프로그레스 바 타이머
 let loadTestTimer = null;
@@ -376,6 +408,10 @@ startBtn.addEventListener('click', () => {
             appendLog(data.message, 'warning');
             currentTaskId = data.task_id;
             modalMessage.innerText = data.message;
+            setupLowConfidenceGate(data);
+            if (pendingLowConfidence) {
+                appendLog(`${lowConfidenceText.textContent} — 승인하려면 낮은 신뢰도 확인이 필요합니다.`, 'warning');
+            }
             completeStep("step-ai");
             activateStep("step-plan");
             completeStep("step-plan");
@@ -469,13 +505,22 @@ approveBtn.addEventListener('click', async () => {
             body: JSON.stringify({
 
                 task_id: currentTaskId,
-                approved: true
+                approved: true,
+                // 저신뢰 확인 게이트(#83): 체크박스를 눌렀을 때만 true. 없으면 서버가 400으로 막는다
+                acknowledge_low_confidence: pendingLowConfidence && lowConfidenceAck.checked
 
             })
 
         });
 
         const result = await response.json();
+
+        if (!response.ok) {
+            // 400: 저신뢰 제안을 확인 없이 승인한 경우 (#83). 승인 대기가 유지되므로 모달을 다시 연다
+            appendLog(result.detail || '승인 요청이 거부되었습니다.', 'error');
+            approvalModal.classList.remove('hidden');
+            return;
+        }
 
         // 성공 시엔 별도 로그 없이(이후 'scaling' 이벤트가 곧 뜬다), 실패했을 때만 로그로 알려준다.
         if (result.status !== 'success') {
@@ -499,8 +544,9 @@ approveBtn.addEventListener('click', async () => {
     }
 
     finally {
-        approveBtn.disabled = false;
         rejectBtn.disabled = false;
+        // 저신뢰 게이트면 체크박스 상태를 따른다 (#83)
+        syncApproveButton();
     }
 
 });
@@ -530,7 +576,9 @@ rejectBtn.addEventListener('click', async () => {
             body: JSON.stringify({
 
                 task_id: currentTaskId,
-                approved: false
+                approved: false,
+                // 거절은 확인 플래그 없이 받는다. 결과 파일 acknowledged 기록용으로 체크 상태만 함께 보낸다 (#83)
+                acknowledge_low_confidence: pendingLowConfidence && lowConfidenceAck.checked
 
             })
 
@@ -551,9 +599,8 @@ rejectBtn.addEventListener('click', async () => {
     }
 
     finally {
-        approveBtn.disabled = false;
         rejectBtn.disabled = false;
-
+        syncApproveButton();
     }
 
 });

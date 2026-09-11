@@ -891,3 +891,47 @@ button:active{
 .chart-nodata    { fill: #8b949e; font-size: 11px; }
 .chart-ref       { stroke: #e6edf3; stroke-width: 1.5; stroke-dasharray: 6 4; }
 .chart-ref-label { fill: #e6edf3; font-size: 11px; font-weight: 700; }
+
+/* ================= 저신뢰 확인 게이트 (#83) ================= */
+.confidence-mark {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 2px;
+    background: #e6edf3;
+    transform: translateX(-1px);
+}
+
+.low-confidence-box {
+    background: rgba(218, 54, 51, .12);
+    border: 1px solid var(--accent-red);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+}
+
+.low-confidence-text {
+    color: #ff7b72;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.low-confidence-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 15px;
+}
+
+.low-confidence-check input {
+    width: 18px;
+    height: 18px;
+}
+
+#approve-btn:disabled {
+    background: #30363d;
+    color: var(--text-muted);
+    cursor: not-allowed;
+    transform: none;
+}

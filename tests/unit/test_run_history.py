@@ -3,23 +3,29 @@ Phase 3(#75) 라운드별 측정 이력 + 결과 파일 저장 테스트.
 
 - RunRecorder 단위 동작: 측정 불가 표기, replica null, 중복 방지, 파일 저장·실패 처리
 - start_agent_stream 전체 경로: 미제안, 승인→스케일링, 거절, 실패, forced, 저장 실패, 스트림 종료
+- /report 결과 패널용 필드(Phase 4)가 결과 파일과 같은지
+- 저신뢰 확인 게이트(#83): confidence < 0.6 승인은 확인 플래그 필요, 0.6은 게이트 없음, 거절은 항상 허용
 
 실제 Locust·Docker·LLM은 실행하지 않는다. engine 함수·replica 조회·Solar 호출을 가짜로 바꾸고,
 Prometheus 헬스체크는 httpx.MockTransport로 응답한다. 결과 파일은 tmp_path에만 쓴다.
 아래 수치는 테스트 입력값이며 측정값이 아니다.
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.agent import nodes
 from app.agent.state import create_initial_state
 from app.api.v1 import agent, run_history
 from app.api.v1.agent import before_measurements, run_records, task_manager
+from app.main import app
 from app.api.v1.run_history import (
     UNMEASURED_LABEL,
     RunRecorder,
@@ -62,6 +68,8 @@ SCALING_PLAN = {
 def _clear_agent_storage() -> None:
     task_manager.states.clear()
     task_manager.futures.clear()
+    task_manager.low_confidence.clear()
+    task_manager.acknowledgements.clear()
     before_measurements.clear()
     run_records.clear()
 
@@ -135,12 +143,12 @@ def _metrics(connections: int) -> SystemMetrics:
     )
 
 
-def _report(requires_scaling: bool) -> BottleneckReport:
+def _report(requires_scaling: bool, confidence: float = 0.8) -> BottleneckReport:
     return BottleneckReport(
         cause="테스트 원인",
         severity="high",
         recommendation="테스트 권장 조치",
-        confidence=0.8,
+        confidence=confidence,
         requires_scaling=requires_scaling,
     )
 
@@ -168,6 +176,7 @@ def _recorder(task_id: str = "task-1") -> RunRecorder:
 def _fake_diagnosis(
     *,
     requires_scaling: bool = False,
+    confidence: float = 0.8,
     fail_before_load: bool = False,
     fail_after_load: bool = False,
 ):
@@ -190,7 +199,7 @@ def _fake_diagnosis(
             )
             return state
 
-        state["bottleneck_report"] = _report(requires_scaling)
+        state["bottleneck_report"] = _report(requires_scaling, confidence)
         state["loop_count"] += 1
 
         if requires_scaling:
@@ -558,6 +567,9 @@ async def test_stream_approved_scaling_records_two_rounds_and_report(
             "round": 1,
             "source": "llm",
             "scaling_plan": {"current_replicas": 1, "desired_replicas": 2},
+            # 신뢰도 0.8 (기준 이상) → 확인 게이트 없음 (#83)
+            "low_confidence": False,
+            "acknowledged": None,
             "decision": "approved",
         }
     ]
@@ -802,3 +814,180 @@ async def test_stream_closed_while_waiting_for_approval_saves_file(
     assert data["user_decision"] == "no_response"
     assert data["outcome"]["agent_outcome"] == "awaiting_approval"
     assert data["outcome"]["end_reason"] == "stream_closed"
+
+
+# ----------------------------------------------------------------------
+# 저신뢰 확인 게이트 (#83): confidence < LOW_CONFIDENCE_THRESHOLD(0.6)인 스케일링 제안.
+# 실측 confidence는 80~95%라 UI로는 확인하기 어려워 단위 테스트로 검증한다 (docs/02 ISSUE-13).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("requires_scaling", "confidence", "expected"),
+    [
+        (True, 0.59, True),
+        (True, 0.6, False),    # 경계값은 게이트 대상이 아니다
+        (True, 0.95, False),
+        (False, 0.3, False),   # 스케일링 제안이 아니면 게이트 없음 (forced 덮어쓰기 포함)
+    ],
+)
+def test_is_low_confidence(requires_scaling, confidence, expected):
+    state = _state_with(
+        _load_result(50.0, 3000.0),
+        _metrics(40),
+        _report(requires_scaling, confidence),
+    )
+
+    assert agent.LOW_CONFIDENCE_THRESHOLD == 0.6
+    assert agent._is_low_confidence(state) is expected
+
+
+def test_is_low_confidence_without_report():
+    assert agent._is_low_confidence(_state_with(None, None)) is False
+
+
+async def test_low_confidence_approval_requires_acknowledgement(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.59),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    events = []
+
+    async for frame in agent.start_agent_stream(target_tps=50, duration=10):
+        event = _parse(frame)
+        events.append(event)
+
+        if event["status"] != "need_approval":
+            continue
+
+        task_id = event["task_id"]
+
+        assert event["low_confidence"] is True
+        assert event["confidence"] == 0.59
+        assert event["low_confidence_threshold"] == 0.6
+
+        report = await agent.get_report(task_id)
+
+        assert report["low_confidence"] is True
+        assert report["waiting_for_approval"] is True
+
+        # 확인 플래그 없는 승인은 API에서 400. 승인 대기는 그대로 남는다 (UI 우회 방지)
+        with pytest.raises(HTTPException) as exc_info:
+            await agent.approve_task(
+                agent.ApprovalRequest(task_id=task_id, approved=True)
+            )
+
+        assert exc_info.value.status_code == 400
+        assert not task_manager.futures[task_id].done()
+
+        response = await agent.approve_task(
+            agent.ApprovalRequest(
+                task_id=task_id,
+                approved=True,
+                acknowledge_low_confidence=True,
+            )
+        )
+
+        assert response["status"] == "success"
+
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is True
+    assert approval["acknowledged"] is True
+    assert approval["decision"] == "approved"
+    assert data["outcome"]["end_reason"] == "scaled"
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["low_confidence"] is True
+    assert report["low_confidence_threshold"] == 0.6
+
+
+async def test_confidence_at_threshold_has_no_gate(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.6),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    # _run_stream은 확인 플래그 없이 승인한다 → 경계값 0.6은 기존처럼 바로 승인된다
+    events = await _run_stream(decision=True)
+    [need_approval] = [e for e in events if e["status"] == "need_approval"]
+
+    assert need_approval["low_confidence"] is False
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is False
+    assert approval["acknowledged"] is None
+    assert approval["decision"] == "approved"
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["low_confidence"] is False
+
+
+async def test_low_confidence_rejection_needs_no_acknowledgement(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.59),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    # _run_stream은 확인 플래그 없이 거절한다 → 거절은 항상 받는다
+    events = await _run_stream(decision=False)
+
+    assert events[-1]["status"] == "failed"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is True
+    assert approval["acknowledged"] is False
+    assert approval["decision"] == "rejected"
+    assert data["outcome"]["end_reason"] == "rejected"
+
+
+def test_approve_endpoint_returns_400_over_http():
+    """HTTP 경로로도 확인 플래그 없는 저신뢰 승인은 400이고 승인 대기가 유지된다."""
+
+    loop = asyncio.new_event_loop()
+
+    try:
+        task_id = "low-confidence-task"
+        task_manager.states[task_id] = create_initial_state(target_tps=50, duration=10)
+        task_manager.futures[task_id] = loop.create_future()
+        task_manager.low_confidence[task_id] = True
+
+        response = TestClient(app).post(
+            "/api/v1/agent/approve",
+            json={"task_id": task_id, "approved": True},
+        )
+
+        assert response.status_code == 400
+        assert "acknowledge_low_confidence" in response.json()["detail"]
+        assert not task_manager.futures[task_id].done()
+    finally:
+        loop.close()

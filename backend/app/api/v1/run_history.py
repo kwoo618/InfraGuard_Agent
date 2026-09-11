@@ -432,6 +432,15 @@ class RunRecorder:
         return decision if decision is not None else "no_response"
 
     @property
+    def low_confidence(self) -> bool:
+        """마지막 승인 요청이 신뢰도 기준 미만 스케일링 제안(확인 게이트)이었는지 (#83)."""
+
+        if not self._approvals:
+            return False
+
+        return bool(self._approvals[-1].get("low_confidence"))
+
+    @property
     def result_file_relative(self) -> str | None:
         """저장한 결과 파일 경로 (repo 루트 기준 상대경로). 저장 전·실패 시 None."""
 
@@ -465,8 +474,16 @@ class RunRecorder:
 
         self.forced_scaling = True
 
-    def open_approval(self, state: AgentRuntimeState) -> None:
-        """사용자에게 스케일링 승인을 요청했다."""
+    def open_approval(
+        self,
+        state: AgentRuntimeState,
+        low_confidence: bool = False,
+    ) -> None:
+        """
+        사용자에게 스케일링 승인을 요청했다.
+
+        low_confidence: 신뢰도 기준 미만 스케일링 제안이라 확인 게이트를 걸었는지 (#83).
+        """
 
         try:
             plan = state.get("scaling_plan") or {}
@@ -485,20 +502,28 @@ class RunRecorder:
                         "current_replicas": plan.get("current_replicas"),
                         "desired_replicas": plan.get("desired_replicas"),
                     },
+                    "low_confidence": bool(low_confidence),
+                    # 저신뢰 게이트일 때만 사용자가 보낸 확인 플래그를 기록한다. 게이트가 없으면 None
+                    "acknowledged": None,
                     "decision": None,
                 }
             )
         except Exception:
             logger.exception("승인 요청 기록 실패 task_id=%s", self.task_id)
 
-    def close_approval(self, approved: bool) -> None:
-        """사용자가 승인 또는 거절했다."""
+    def close_approval(
+        self,
+        approved: bool,
+        acknowledged: bool | None = None,
+    ) -> None:
+        """사용자가 승인 또는 거절했다. acknowledged는 저신뢰 확인 플래그 (게이트가 없으면 None)."""
 
         try:
             if self._approvals:
                 self._approvals[-1]["decision"] = (
                     "approved" if approved else "rejected"
                 )
+                self._approvals[-1]["acknowledged"] = acknowledged
         except Exception:
             logger.exception("사용자 결정 기록 실패 task_id=%s", self.task_id)
 

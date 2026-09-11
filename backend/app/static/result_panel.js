@@ -301,7 +301,8 @@ function severityBadge(severity) {
     return el('span', `badge ${className}`, `심각도 ${label}`);
 }
 
-function confidenceMeter(confidence) {
+/** threshold(#83 저신뢰 확인 게이트 기준, /report low_confidence_threshold)가 있으면 막대에 기준선을 그린다. */
+function confidenceMeter(confidence, threshold) {
     const wrap = el('div', 'confidence');
     wrap.appendChild(el('span', 'confidence-label', '신뢰도'));
 
@@ -311,6 +312,13 @@ function confidenceMeter(confidence) {
         fill.style.width = `${Math.max(0, Math.min(confidence, 1)) * 100}%`;
     }
     track.appendChild(fill);
+
+    if (isNumber(threshold)) {
+        const mark = el('div', 'confidence-mark');
+        mark.style.left = `${threshold * 100}%`;
+        mark.title = `승인 확인 기준 ${Math.round(threshold * 100)}% (미만이면 확인 후 승인)`;
+        track.appendChild(mark);
+    }
 
     wrap.appendChild(track);
     wrap.appendChild(el('span', 'confidence-value', fmtConfidence(confidence)));
@@ -359,7 +367,11 @@ function decisionLine(approval) {
         rejected: ['거절 ✖', 'decision-rejected'],
     };
     const [label, className] = styles[approval.decision] || ['응답 없음', 'decision-none'];
-    return el('div', `decision-line ${className}`, `사용자 결정: ${label}`);
+    // 저신뢰 확인 게이트(#83)에서 확인 체크 후 승인했으면 함께 표시한다
+    const acknowledged = approval.low_confidence && approval.acknowledged && approval.decision === 'approved'
+        ? ' (낮은 신뢰도 확인 후)'
+        : '';
+    return el('div', `decision-line ${className}`, `사용자 결정: ${label}${acknowledged}`);
 }
 
 function diagnosisRawDetails(diagnosis) {
@@ -369,6 +381,15 @@ function diagnosisRawDetails(diagnosis) {
     ]);
 }
 
+/** 저신뢰 확인 게이트(#83)가 걸렸던 승인 요청 표시 */
+function lowConfidenceBadge(report) {
+    const threshold = report.low_confidence_threshold;
+    const text = isNumber(threshold)
+        ? `신뢰도 기준 미만 (< ${Math.round(threshold * 100)}%)`
+        : '신뢰도 기준 미만';
+    return el('span', 'badge badge-danger', text);
+}
+
 function buildDiagnosisCard(diagnosis, approval, record, report) {
     const slo = report.conditions ? report.conditions.p95_slo_ms : null;
     const card = el('div', 'diagnosis-card');
@@ -376,7 +397,8 @@ function buildDiagnosisCard(diagnosis, approval, record, report) {
     const head = el('div', 'diagnosis-head');
     head.appendChild(conclusionBadge(diagnosis, approval));
     head.appendChild(severityBadge(diagnosis.severity));
-    head.appendChild(confidenceMeter(diagnosis.confidence));
+    if (approval && approval.low_confidence) head.appendChild(lowConfidenceBadge(report));
+    head.appendChild(confidenceMeter(diagnosis.confidence, report.low_confidence_threshold));
     card.appendChild(head);
 
     card.appendChild(el('div', 'chip-group-title', '진단 입력 측정값'));
@@ -408,13 +430,14 @@ function buildRevalidationRow(revalidation) {
     return row;
 }
 
-function buildReDiagnosisRow(diagnosis, approval) {
+function buildReDiagnosisRow(diagnosis, approval, report = {}) {
     const row = el('div', 'followup-row');
 
     const head = el('div', 'followup-head');
     head.appendChild(el('span', 'followup-title', `라운드 ${diagnosis.round ?? '-'} 재진단`));
     head.appendChild(conclusionBadge(diagnosis, approval));
     head.appendChild(severityBadge(diagnosis.severity));
+    if (approval && approval.low_confidence) head.appendChild(lowConfidenceBadge(report));
     head.appendChild(el('span', 'followup-meta', `신뢰도 ${fmtConfidence(diagnosis.confidence)}`));
     row.appendChild(head);
 
@@ -454,7 +477,7 @@ function buildDiagnosisSection(report) {
         followUps.push({
             round: diagnosis.round ?? 0,
             order: 1,
-            node: buildReDiagnosisRow(diagnosis, findByRound(approvals, diagnosis.round)),
+            node: buildReDiagnosisRow(diagnosis, findByRound(approvals, diagnosis.round), report),
         });
     });
     followUps

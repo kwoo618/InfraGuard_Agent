@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import httpx
@@ -34,17 +35,43 @@ before_measurements: dict[str, "LoadTestResult"] = {}
 # key: task_id, value: RunRecorder
 run_records: dict[str, RunRecorder] = {}
 
+# HITL 지점 2 (CLAUDE.md "진단 결과 불확실 시"): LLM 신뢰도가 이 값 미만인 스케일링 제안은
+# 사용자가 낮은 신뢰도를 확인해야 승인할 수 있다 (#83, docs/02 ISSUE-13).
+# 가드레일 값이라 환경변수로 두지 않는다. 기준값과 같은 0.6은 게이트 대상이 아니다.
+LOW_CONFIDENCE_THRESHOLD = 0.6
 
-def _sse(status: str, task_id: str | None, message: str) -> str:
+
+def _is_low_confidence(state: AgentRuntimeState) -> bool:
+    """승인을 요청하는 LLM 판단이 스케일링 제안이면서 신뢰도가 기준 미만인지."""
+
+    report = state.get("bottleneck_report")
+    return (
+        report is not None
+        and report.requires_scaling
+        and report.confidence < LOW_CONFIDENCE_THRESHOLD
+    )
+
+
+def _sse(
+    status: str,
+    task_id: str | None,
+    message: str,
+    extra: dict | None = None,
+) -> str:
     """
     SSE data 프레임을 안전하게 만든다.
 
     LLM이 생성한 문자열(cause/recommendation 등)이 message에 그대로 들어오는 경우가
     많아졌기 때문에, 따옴표/줄바꿈을 이스케이프하지 않으면 JSON이 깨질 수 있다.
+    extra는 status/task_id/message 뒤에 붙는 추가 필드다 (값은 json.dumps로 직렬화).
     """
     safe_message = message.replace('"', "'").replace("\n", " ")
     task_id_json = f"\"{task_id}\"" if task_id else "null"
-    return f"data: {{\"status\": \"{status}\", \"task_id\": {task_id_json}, \"message\": \"{safe_message}\"}}\n\n"
+    extra_json = "".join(
+        f", {json.dumps(key)}: {json.dumps(value)}"
+        for key, value in (extra or {}).items()
+    )
+    return f"data: {{\"status\": \"{status}\", \"task_id\": {task_id_json}, \"message\": \"{safe_message}\"{extra_json}}}\n\n"
 
 
 async def _read_replicas() -> int:
@@ -68,22 +95,30 @@ class AgentTaskManager:
     def __init__(self):
         self.states: dict[str, AgentRuntimeState] = {}
         self.futures: dict[str, asyncio.Future] = {}
+        # 현재 승인 요청이 저신뢰 확인 게이트인지 (#83). /approve가 확인 플래그를 요구할지 정한다
+        self.low_confidence: dict[str, bool] = {}
+        # 사용자가 결정과 함께 보낸 acknowledge_low_confidence 값 (결과 파일 approvals[].acknowledged)
+        self.acknowledgements: dict[str, bool] = {}
 
     def register_task(self, state: AgentRuntimeState) -> str:
         task_id = state["task_id"]
         self.states[task_id] = state
         return task_id
 
-    def create_approval_gate(self, task_id: str) -> None:
+    def create_approval_gate(self, task_id: str, low_confidence: bool = False) -> None:
         """
         승인이 필요한 라운드마다 새 Future를 만든다.
 
         ReAct Loop 특성상 한 task_id로 승인 요청이 여러 번(스케일링 후에도
         개선이 부족하면 다시 승인 대기) 발생할 수 있어서, register_task
         시점에 한 번만 만드는 게 아니라 매 라운드 새로 발급해야 한다.
+
+        low_confidence=True면 이번 요청은 확인 플래그 없이는 승인을 받지 않는다 (#83).
         """
         loop = asyncio.get_running_loop()
         self.futures[task_id] = loop.create_future()
+        self.low_confidence[task_id] = low_confidence
+        self.acknowledgements.pop(task_id, None)
 
     async def wait_for_approval(self, task_id: str) -> bool:
         print(f"[wait] waiting... {task_id}")
@@ -92,9 +127,17 @@ class AgentTaskManager:
         print(f"[wait] resumed! approved={approved}")
         return approved
 
-    def approve_task(self, task_id: str, approved: bool) -> str:
+    def approve_task(
+        self,
+        task_id: str,
+        approved: bool,
+        acknowledge_low_confidence: bool = False,
+    ) -> str:
         """
-        반환값: "success" | "not_found" | "already_done"
+        반환값: "success" | "not_found" | "already_done" | "acknowledgement_required"
+
+        저신뢰 확인 게이트(#83)가 걸린 요청을 확인 플래그 없이 승인하면
+        "acknowledgement_required"를 반환하고 승인 대기를 그대로 둔다. 거절은 플래그 없이 받는다.
         """
         print(f"[approve] task={task_id}, approved={approved}")
 
@@ -109,6 +152,15 @@ class AgentTaskManager:
             print("[approve] already completed")
             return "already_done"
 
+        if (
+            approved
+            and self.low_confidence.get(task_id, False)
+            and not acknowledge_low_confidence
+        ):
+            print("[approve] low confidence - acknowledgement required")
+            return "acknowledgement_required"
+
+        self.acknowledgements[task_id] = acknowledge_low_confidence
         future.set_result(approved)
 
         print("[approve] future completed")
@@ -126,16 +178,35 @@ task_manager = AgentTaskManager()
 class ApprovalRequest(BaseModel):
     task_id: str
     approved: bool
+    # 신뢰도 기준 미만 스케일링 제안을 승인할 때 true가 필요하다 (#83).
+    # 기존 클라이언트 호환을 위해 기본값은 false. 거절에는 필요 없다
+    acknowledge_low_confidence: bool = False
 
 @router.post("/agent/approve")
 async def approve_task(req: ApprovalRequest):
     """
     주황색 모달창에서 [승인] / [거절] 버튼을 누르면 호출되는 API입니다.
+
+    신뢰도 기준 미만 스케일링 제안(#83)을 acknowledge_low_confidence 없이 승인하면 400을 반환합니다.
+    UI 체크박스만이 아니라 API를 직접 호출해도 확인 없이 승인할 수 없게 하기 위해서입니다.
     """
-    result = task_manager.approve_task(req.task_id, req.approved)
+    result = task_manager.approve_task(
+        req.task_id,
+        req.approved,
+        req.acknowledge_low_confidence,
+    )
 
     if result == "success":
         return {"status": "success", "message": f"Task {req.task_id} 승인 상태 반영 완료"}
+
+    if result == "acknowledgement_required":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"AI 신뢰도가 기준({LOW_CONFIDENCE_THRESHOLD:.0%}) 미만인 스케일링 제안입니다. "
+                "낮은 신뢰도를 확인했다면 acknowledge_low_confidence=true로 다시 승인하세요."
+            ),
+        )
 
     if result == "already_done":
         return {"status": "error", "message": "이미 처리된 작업입니다. (중복 클릭)"}
@@ -253,6 +324,11 @@ async def get_report(task_id: str):
         "approvals": recorder.approvals if recorder else [],          # 승인 요청과 사용자 결정
         "scaling_results": recorder.scaling_results if recorder else [],
         "revalidations": recorder.revalidations if recorder else [],  # 재검증 요약 (LLM 변화량 제외)
+        # ---- #83 저신뢰 확인 게이트 ----
+        # 마지막 승인 요청이 신뢰도 기준 미만 스케일링 제안이었는지.
+        # 승인 대기 중이면 /approve에 acknowledge_low_confidence=true가 있어야 승인된다
+        "low_confidence": recorder.low_confidence if recorder else False,
+        "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
     }
 
 
@@ -445,15 +521,34 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 return
 
             # ---- 승인 요청 ----
-            task_manager.create_approval_gate(task_id)
-            recorder.open_approval(state)
+            # 신뢰도 기준 미만 스케일링 제안이면 확인 게이트를 건다 (#83). 기준 이상이면 기존 흐름과 같다
+            low_confidence = _is_low_confidence(state)
+            task_manager.create_approval_gate(task_id, low_confidence=low_confidence)
+            recorder.open_approval(state, low_confidence=low_confidence)
 
             approval_message = state.get("final_answer") or "병목 감지 — 서버 증설이 필요합니다. 승인해주세요."
-            yield _sse("need_approval", task_id, f"⚠️ {approval_message}")
+            diagnosis_report = state.get("bottleneck_report")
+            yield _sse(
+                "need_approval",
+                task_id,
+                f"⚠️ {approval_message}",
+                extra={
+                    "low_confidence": low_confidence,
+                    "confidence": diagnosis_report.confidence if diagnosis_report is not None else None,
+                    "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
+                },
+            )
 
             # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
             approved = await task_manager.wait_for_approval(task_id)
-            recorder.close_approval(approved)
+            recorder.close_approval(
+                approved,
+                acknowledged=(
+                    task_manager.acknowledgements.get(task_id, False)
+                    if low_confidence
+                    else None
+                ),
+            )
 
             # resume_after_approval()이 재검증하면서 load_test_result를 "이후" 값으로
             # 덮어쓰기 전에, "이전" 값을 스냅샷해둔다. (다회차 루프에서도 최초 1회만 저장)
