@@ -217,3 +217,20 @@ TARGET_SERVER_URL=http://localhost:8080
 - Kubernetes HPA 연동 — Docker Compose 수준에서 먼저 구현
 - 멀티 에이전트 구조 — 단일 ReAct Loop MVP 완성 후 확장
 - 실시간 FinOps 비용 최적화 — 2단계 목표
+
+## 현재 단계: 우수작품경진대회 추가 개발 (제출 9/15)
+
+작업 전 반드시 `docs/00_작업가이드.md`와 해당 작업 문서를 먼저 읽는다.
+측정하지 않은 수치를 코드·UI·문서에 넣지 않는다. 가드레일 값 변경 금지.
+문서와 코드가 다르면 코드가 기준이며, 차이를 보고한다.
+
+### 절대 원칙
+- 측정하지 않은 수치를 코드·UI·문서에 하드코딩하거나 예시값을 실측처럼 표시하지 않는다.
+- 가드레일 값(MAX_LOOP 10, 50 TPS, replica 8, timeout 300, confidence 0.6)은 변경 금지.
+- 기존 API 응답 필드는 삭제·이름 변경 금지 (추가만 허용).
+- 변경 후 반드시 `pytest tests/` 통과 확인.
+
+### 알려진 이슈
+- prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨 → dns_sd_configs로 교체 필요
+- Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음
+- Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
