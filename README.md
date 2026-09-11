@@ -46,11 +46,14 @@ InfraGuard_Agent
 │   │   │   └── generate_plan.py   # 최적화 플랜 생성
 │   │   ├── api
 │   │   │   └── v1
-│   │   │       └── agent.py       # /start /approve /report
-│   │   ├── static
+│   │   │       ├── agent.py       # /start /approve /report
+│   │   │       └── saved_results.py # 저장된 실행 기록(docs/evidence) 읽기 전용 조회
+│   │   ├── static                 # 기본 보기(C) / 상세 보기(A) 전환 UI (?view=simple|detail)
 │   │   │   ├── index.html
 │   │   │   ├── main.js
-│   │   │   └── style.css
+│   │   │   ├── result_panel.js    # 결과 패널 공용 계산
+│   │   │   ├── view_switch.js · saved_results.js · toolbar.css
+│   │   │   └── refresh            # common.* (공용) · c.* (기본 보기) · a.* (상세 보기)
 │   │   └── main.py
 │   ├── Dockerfile
 │   └── requirements.txt
