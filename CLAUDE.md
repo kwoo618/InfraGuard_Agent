@@ -41,6 +41,7 @@ pytest tests/unit/test_metrics.py -v
 pytest tests/unit/test_prompts.py -v
 pytest tests/unit/test_api.py -v
 pytest tests/unit/test_run_history.py -v
+pytest tests/unit/test_replica_reset.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -67,24 +68,26 @@ InfraGuard_Agent
 │   │   │   ├── prompts.py         # 시스템 프롬프트
 │   │   │   └── nodes.py           # LLM reasoning node
 │   │   ├── tools
-│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱
-│   │   │   ├── get_metrics.py     # Prometheus 쿼리
+│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱 (+ 그래프용 초 단위 시계열·엔드포인트 통계)
+│   │   │   ├── get_metrics.py     # Prometheus 쿼리 (활성 연결 수, 서버별 요청 수)
 │   │   │   ├── scale_service.py   # Docker replica 조정
 │   │   │   └── generate_plan.py   # 최적화 플랜 생성
 │   │   ├── api
 │   │   │   └── v1
-│   │   │       ├── agent.py       # /start /approve /report
-│   │   │       └── run_history.py # 라운드별 측정 이력 + results/ 결과 파일 저장
-│   │   ├── static                 # SSE UI + HITL 버튼
+│   │   │       ├── agent.py       # /start /approve /report /replicas
+│   │   │       └── run_history.py # 라운드별 측정 이력·그래프 데이터 + results/ 결과 파일 저장
+│   │   ├── static                 # SSE UI + HITL 버튼 + 결과 패널
 │   │   │   ├── index.html
 │   │   │   ├── main.js
+│   │   │   ├── result_panel.js    # 결과 패널 (요약 배너, AI 판단, 전/후 비교, 측정 조건)
+│   │   │   ├── result_charts.js   # 결과 패널 부하 중 그래프 (inline SVG)
 │   │   │   └── style.css
 │   │   └── main.py                # FastAPI 앱 진입점
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── infra
 │   ├── locust
-│   │   ├── locustfile.py          # 부하 시나리오
+│   │   ├── locustfile.py          # 부하 시나리오 + 요청별 원시 기록 훅 (--csv prefix 옆 _requests.csv)
 │   │   └── locust.conf            # 부하 기본 설정 (동시 가상 사용자 기본값 50)
 │   ├── nginx
 │   │   └── nginx.conf             # target-server 로드밸런서 (localhost:8080)
@@ -102,7 +105,8 @@ InfraGuard_Agent
 │   │   ├── test_prompts.py
 │   │   ├── test_agent.py
 │   │   ├── test_api.py
-│   │   └── test_run_history.py
+│   │   ├── test_run_history.py
+│   │   └── test_replica_reset.py
 │   └── integration
 │       └── test_e2e.py
 ├── results                        # 실행 결과 JSON (gitignore). 발표 증빙은 골라서 docs/evidence/로 옮긴다
@@ -178,16 +182,20 @@ class AgentRuntimeState(TypedDict):
 
 | 메서드 | 경로 | 담당 | 설명 |
 |---|---|---|---|
-| POST | `/api/v1/agent/start` | 최소명 | TPS·duration 수신, 에이전트 루프 시작, SSE 스트리밍 |
-| POST | `/api/v1/agent/approve` | 최소명 | HITL 스케일링 승인 |
-| GET | `/api/v1/agent/report/{task_id}` | 최소명 | 최종 종합 분석 리포트 반환 |
+| GET | `/api/v1/agent/start` | 최소명 | TPS(동시 가상 사용자 수)·duration 수신, 에이전트 루프 시작, SSE 스트리밍 (EventSource라 GET. 코드 기준으로 정정) |
+| POST | `/api/v1/agent/approve` | 최소명 | HITL 스케일링 승인. 저신뢰 제안은 `acknowledge_low_confidence=true` 필요 (#83) |
+| GET | `/api/v1/agent/report/{task_id}` | 최소명 | 최종 종합 분석 리포트 반환. Phase 3·4에서 필드 추가 (기존 필드 유지) |
+| GET | `/api/v1/agent/replicas` | 최강우 | 현재 target-server replica 수(docker compose 실제 값)와 실행 중 여부 |
+| POST | `/api/v1/agent/replicas/reset` | 최강우 | 측정 회차 사이 1대 초기화. 에이전트 실행·승인 대기 중이면 409. results/에 기록하지 않음 |
 
 ## HITL(Human-In-The-Loop) 지점
 
 반드시 사람 승인을 받아야 하는 지점:
 
 1. **컨테이너 스케일링 실행 전** — `replica를 2→4로 늘리겠습니다. 실행할까요?`
-2. **진단 결과 불확실 시** — LLM confidence < 0.6이면 추가 정보 요청
+2. **진단 결과 불확실 시** — LLM confidence < 0.6인 스케일링 제안은 승인 전 확인 게이트를 건다.
+   경고와 "낮은 신뢰도를 확인했습니다" 체크 없이는 승인할 수 없고, `/approve`도 `acknowledge_low_confidence` 없이 승인하면 400이다.
+   거절은 항상 가능하다 (#83, docs/02 ISSUE-13). 설계 초안의 "추가 정보 요청" 흐름은 구현하지 않았다.
 3. **외부 비용 발생 작업** — 클라우드 프로비저닝은 MVP 범위 밖, 로컬 Docker만
 
 HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병목 진단
@@ -198,6 +206,7 @@ HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병
 - Locust 부하 상한 **동시 가상 사용자 50** — 로컬 환경 CPU 고갈 방지. `run_load_test.py`가 target_tps를 Locust `--users`로 넘기고 `MAX_TPS = 50`으로 막는다 (`locust.conf`의 users 기본값도 50). 처리량(TPS) 상한이 아니다 — 스케일 후 실측 98.5 TPS (docs/02 ISSUE-11)
 - `scale_service` replica 최대 **8개**
 - 에이전트 루프 `asyncio.timeout(300)` — 5분 초과 시 강제 종료
+- 저신뢰 확인 게이트 기준 `LOW_CONFIDENCE_THRESHOLD = 0.6` — `backend/app/api/v1/agent.py` 코드 상수(환경변수 아님). 0.6 미만만 게이트 대상
 
 ## LLM 설정
 
@@ -216,7 +225,7 @@ PROMETHEUS_URL=http://localhost:9090
 MAX_LOOP=10
 TARGET_SERVER_URL=http://localhost:8080
 P95_SLO_MS=1000                # P95 SLO(ms), 진단 프롬프트 판단 기준 (docs/02 ISSUE-10)
-DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling), 발표·측정 시 반드시 false
+DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling, UI는 ?debug=1일 때만 요청), 발표·측정 시 반드시 false
 ```
 
 ## 테스트 작성 시 주의사항
@@ -249,7 +258,11 @@ DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling), 발표·측정
 - ~~prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨~~ → **해결됨** (Phase 1, dns_sd_configs 적용. 2026-09-11 replica 3개 모두 UP 확인, docs/02 ISSUE-2)
 - ~~스케일 아웃해도 부하가 replica 1개로만 감 / 재생성 후 호스트 8080이 비어 부하 대상이 사라짐~~ → **해결됨** (Phase 2, nginx 로드밸런서가 호스트 8080 고정, target-server replica는 호스트 포트 없음. 2026-09-11 replica 3개 균등 분산·재생성 후 8080 유지 확인, docs/02 ISSUE-1·9)
 - ~~LLM 진단 입력에 CPU/메모리 0% 고정값이 측정값처럼 들어가고 P95 판단 기준이 없음~~ → **해결됨** (#78, 미수집 항목 "측정 불가" 표시 + `P95_SLO_MS` 기본 1000ms. 2026-09-11 5회 모두 CPU/메모리를 근거에서 제외·SLO 언급 확인, target_tps 50 3회 중 2회 스케일링 제안, docs/02 ISSUE-10)
+- ~~신뢰도 0.6 미만 HITL이 설계 문서에만 있고 코드에 없음~~ → **해결됨** (#83, 승인 전 확인 게이트 + `/approve` 400. 단위 테스트로 검증, 실측 confidence는 80~95%라 UI 수동 검증 없음, docs/02 ISSUE-13)
 - Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음 (LLM 입력에는 "측정 불가"로 표시, #78)
-- target_tps는 처리량이 아니라 Locust 동시 가상 사용자 수(`--users`)다. UI·프롬프트의 "목표 TPS" 표기가 오해를 만든다 (docs/02 ISSUE-11, 기록만)
+- target_tps는 처리량이 아니라 Locust 동시 가상 사용자 수(`--users`)다. UI 입력 라벨과 결과 패널은 "동시 가상 사용자 수"로 바꿨다(Phase 4). LLM 프롬프트의 "목표 TPS" 표기는 그대로다 (docs/02 ISSUE-11)
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
 - e2e(`tests/integration/test_e2e.py`)는 LLM이 스케일링을 제안하면 실패한다. httpx `ASGITransport`가 SSE를 앱 종료까지 버퍼링해 승인 대기에서 교착한다 (docs/02 ISSUE-12, #80)
+- 실행 중 SSE 스트림이 끊기면(탭 닫기·새로고침) Locust 서브프로세스는 끝까지 돈다. 다음 실행과 겹치면 측정이 오염된다 — 2026-09-11 실제 발생(233316 R1, 발표 수치에서 제외) (docs/02 ISSUE-5)
+- Locust `_stats.csv`가 부하 마지막 약 1초를 빠뜨려 LoadTestResult 헤드라인 값(total_requests 등)이 약 4~6% 적은 요청으로 계산된다. 결과 패널 초 단위 그래프는 요청별 기록이라 영향 없음 (docs/02 ISSUE-15, #85)
+- run_load_test가 Locust 출력을 cp949로 읽어 연결 불가 시 stderr가 사라지고, 같은 조건에서 요청 0건 LoadTestResult를 정상 반환한다 (docs/02 ISSUE-16, #84)

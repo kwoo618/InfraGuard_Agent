@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+import time
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -7,10 +10,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent.engine import resume_after_approval, run_diagnosis
-from app.agent.nodes import call_solar_api
+from app.agent.nodes import call_solar_api, run_load_test_node
 from app.agent.state import AgentRuntimeState, create_initial_state
 from app.api.v1.run_history import RunRecorder
-from app.tools.scale_service import get_current_replicas
+from app.tools.get_metrics import (
+    EXCLUDED_HANDLERS,
+    LOAD_HANDLERS,
+    get_request_counts_by_instance,
+    instance_request_deltas,
+)
+from app.tools.run_load_test import run_load_test_detailed
+from app.tools.scale_service import get_current_replicas, scale_service
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
 router = APIRouter()
@@ -34,17 +44,50 @@ before_measurements: dict[str, "LoadTestResult"] = {}
 # key: task_id, value: RunRecorder
 run_records: dict[str, RunRecorder] = {}
 
+# HITL 지점 2 (CLAUDE.md "진단 결과 불확실 시"): LLM 신뢰도가 이 값 미만인 스케일링 제안은
+# 사용자가 낮은 신뢰도를 확인해야 승인할 수 있다 (#83, docs/02 ISSUE-13).
+# 가드레일 값이라 환경변수로 두지 않는다. 기준값과 같은 0.6은 게이트 대상이 아니다.
+LOW_CONFIDENCE_THRESHOLD = 0.6
 
-def _sse(status: str, task_id: str | None, message: str) -> str:
+# 결과 패널 그래프(서버별 요청 분산, docs/03 Phase 4): 부하가 끝난 뒤 Prometheus가 한 번 더
+# 수집할 때까지 기다렸다가 인스턴스별 요청 카운터를 읽는다 (scrape 5초 + 여유 2초, infra/prometheus/prometheus.yml).
+INSTANCE_SNAPSHOT_DELAY_SEC = 7.0
+
+# 종료 SSE를 보내기 전에 늦게 오는 그래프 데이터를 기다리는 최대 시간(초). 넘으면 null로 저장한다
+DETAILS_SETTLE_TIMEOUT_SEC = 10.0
+
+
+def _is_low_confidence(state: AgentRuntimeState) -> bool:
+    """승인을 요청하는 LLM 판단이 스케일링 제안이면서 신뢰도가 기준 미만인지."""
+
+    report = state.get("bottleneck_report")
+    return (
+        report is not None
+        and report.requires_scaling
+        and report.confidence < LOW_CONFIDENCE_THRESHOLD
+    )
+
+
+def _sse(
+    status: str,
+    task_id: str | None,
+    message: str,
+    extra: dict | None = None,
+) -> str:
     """
     SSE data 프레임을 안전하게 만든다.
 
     LLM이 생성한 문자열(cause/recommendation 등)이 message에 그대로 들어오는 경우가
     많아졌기 때문에, 따옴표/줄바꿈을 이스케이프하지 않으면 JSON이 깨질 수 있다.
+    extra는 status/task_id/message 뒤에 붙는 추가 필드다 (값은 json.dumps로 직렬화).
     """
     safe_message = message.replace('"', "'").replace("\n", " ")
     task_id_json = f"\"{task_id}\"" if task_id else "null"
-    return f"data: {{\"status\": \"{status}\", \"task_id\": {task_id_json}, \"message\": \"{safe_message}\"}}\n\n"
+    extra_json = "".join(
+        f", {json.dumps(key)}: {json.dumps(value)}"
+        for key, value in (extra or {}).items()
+    )
+    return f"data: {{\"status\": \"{status}\", \"task_id\": {task_id_json}, \"message\": \"{safe_message}\"{extra_json}}}\n\n"
 
 
 async def _read_replicas() -> int:
@@ -61,6 +104,64 @@ async def _read_replicas() -> int:
         return 0
 
 
+async def _read_instance_counts() -> dict[str, float] | None:
+    """인스턴스별 요청 카운터. 어떤 실패도 None으로 바꿔 부하 테스트 흐름에 영향을 주지 않는다."""
+    try:
+        return await get_request_counts_by_instance()
+    except Exception as exc:
+        print(f"[run_history] 서버별 요청 카운터 조회 실패: {exc}")
+        return None
+
+
+async def _collect_instance_requests(
+    recorder: RunRecorder,
+    entry: dict[str, Any],
+    before: dict[str, float] | None,
+    load_ended_at: float,
+) -> None:
+    """
+    부하가 끝나고 INSTANCE_SNAPSHOT_DELAY_SEC 뒤에 인스턴스별 요청 카운터를 다시 읽어
+    부하 전후 차이(서버별 부하 요청 수)를 기록한다. 백그라운드 task로 돈다.
+    실패하면 requests_by_instance는 null로 남는다 (에이전트 흐름과 무관).
+    """
+    try:
+        wait = INSTANCE_SNAPSHOT_DELAY_SEC - (time.monotonic() - load_ended_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        after = await _read_instance_counts()
+        counts = instance_request_deltas(before, after)
+
+        if counts is None:
+            return
+
+        recorder.set_instance_requests(entry, {
+            "handlers": list(LOAD_HANDLERS),
+            "excluded": list(EXCLUDED_HANDLERS),
+            "counts": counts,
+        })
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[run_history] 서버별 요청 수 기록 실패: {exc}")
+
+
+async def _finalize(
+    recorder: RunRecorder,
+    state: AgentRuntimeState,
+    end_reason: str,
+    message: str | None = None,
+):
+    """
+    늦게 오는 그래프 데이터(서버별 요청 수)를 최대 DETAILS_SETTLE_TIMEOUT_SEC 기다린 뒤 결과 파일을 저장한다.
+
+    대기는 마지막 부하가 끝나고 INSTANCE_SNAPSHOT_DELAY_SEC가 안 지났을 때만 생긴다.
+    보통은 LLM 호출 시간 동안 이미 끝나 있다.
+    """
+    await recorder.settle(DETAILS_SETTLE_TIMEOUT_SEC)
+    return recorder.finalize(state, end_reason, message)
+
+
 # =================================================================
 # 🔒 비동기 자물쇠(Event)와 상태를 안전하게 관리하는 매니저
 # =================================================================
@@ -68,22 +169,30 @@ class AgentTaskManager:
     def __init__(self):
         self.states: dict[str, AgentRuntimeState] = {}
         self.futures: dict[str, asyncio.Future] = {}
+        # 현재 승인 요청이 저신뢰 확인 게이트인지 (#83). /approve가 확인 플래그를 요구할지 정한다
+        self.low_confidence: dict[str, bool] = {}
+        # 사용자가 결정과 함께 보낸 acknowledge_low_confidence 값 (결과 파일 approvals[].acknowledged)
+        self.acknowledgements: dict[str, bool] = {}
 
     def register_task(self, state: AgentRuntimeState) -> str:
         task_id = state["task_id"]
         self.states[task_id] = state
         return task_id
 
-    def create_approval_gate(self, task_id: str) -> None:
+    def create_approval_gate(self, task_id: str, low_confidence: bool = False) -> None:
         """
         승인이 필요한 라운드마다 새 Future를 만든다.
 
         ReAct Loop 특성상 한 task_id로 승인 요청이 여러 번(스케일링 후에도
         개선이 부족하면 다시 승인 대기) 발생할 수 있어서, register_task
         시점에 한 번만 만드는 게 아니라 매 라운드 새로 발급해야 한다.
+
+        low_confidence=True면 이번 요청은 확인 플래그 없이는 승인을 받지 않는다 (#83).
         """
         loop = asyncio.get_running_loop()
         self.futures[task_id] = loop.create_future()
+        self.low_confidence[task_id] = low_confidence
+        self.acknowledgements.pop(task_id, None)
 
     async def wait_for_approval(self, task_id: str) -> bool:
         print(f"[wait] waiting... {task_id}")
@@ -92,9 +201,17 @@ class AgentTaskManager:
         print(f"[wait] resumed! approved={approved}")
         return approved
 
-    def approve_task(self, task_id: str, approved: bool) -> str:
+    def approve_task(
+        self,
+        task_id: str,
+        approved: bool,
+        acknowledge_low_confidence: bool = False,
+    ) -> str:
         """
-        반환값: "success" | "not_found" | "already_done"
+        반환값: "success" | "not_found" | "already_done" | "acknowledgement_required"
+
+        저신뢰 확인 게이트(#83)가 걸린 요청을 확인 플래그 없이 승인하면
+        "acknowledgement_required"를 반환하고 승인 대기를 그대로 둔다. 거절은 플래그 없이 받는다.
         """
         print(f"[approve] task={task_id}, approved={approved}")
 
@@ -109,6 +226,15 @@ class AgentTaskManager:
             print("[approve] already completed")
             return "already_done"
 
+        if (
+            approved
+            and self.low_confidence.get(task_id, False)
+            and not acknowledge_low_confidence
+        ):
+            print("[approve] low confidence - acknowledgement required")
+            return "acknowledgement_required"
+
+        self.acknowledgements[task_id] = acknowledge_low_confidence
         future.set_result(approved)
 
         print("[approve] future completed")
@@ -126,21 +252,113 @@ task_manager = AgentTaskManager()
 class ApprovalRequest(BaseModel):
     task_id: str
     approved: bool
+    # 신뢰도 기준 미만 스케일링 제안을 승인할 때 true가 필요하다 (#83).
+    # 기존 클라이언트 호환을 위해 기본값은 false. 거절에는 필요 없다
+    acknowledge_low_confidence: bool = False
 
 @router.post("/agent/approve")
 async def approve_task(req: ApprovalRequest):
     """
     주황색 모달창에서 [승인] / [거절] 버튼을 누르면 호출되는 API입니다.
+
+    신뢰도 기준 미만 스케일링 제안(#83)을 acknowledge_low_confidence 없이 승인하면 400을 반환합니다.
+    UI 체크박스만이 아니라 API를 직접 호출해도 확인 없이 승인할 수 없게 하기 위해서입니다.
     """
-    result = task_manager.approve_task(req.task_id, req.approved)
+    result = task_manager.approve_task(
+        req.task_id,
+        req.approved,
+        req.acknowledge_low_confidence,
+    )
 
     if result == "success":
         return {"status": "success", "message": f"Task {req.task_id} 승인 상태 반영 완료"}
+
+    if result == "acknowledgement_required":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"AI 신뢰도가 기준({LOW_CONFIDENCE_THRESHOLD:.0%}) 미만인 스케일링 제안입니다. "
+                "낮은 신뢰도를 확인했다면 acknowledge_low_confidence=true로 다시 승인하세요."
+            ),
+        )
 
     if result == "already_done":
         return {"status": "error", "message": "이미 처리된 작업입니다. (중복 클릭)"}
 
     return {"status": "error", "message": "해당 작업 ID를 찾을 수 없습니다."}
+
+
+# =================================================================
+# 🔄 현재 서버 수 조회 · 1대 초기화 (측정 회차 사이 사람의 수동 조작)
+# 에이전트 실행이 아니므로 results/에 기록하지 않고 서버 로그만 남긴다.
+# =================================================================
+# 초기화가 진행 중인지. 중복 요청은 409로 거부한다
+_replica_reset_in_progress = False
+
+
+def _agent_busy() -> bool:
+    """
+    에이전트 실행이 진행 중인지 (승인 대기 포함).
+
+    실행마다 RunRecorder가 생기고 실행이 끝나는 모든 경로(스트림 종료 포함)에서 finalize되므로,
+    finalize되지 않은 기록기가 있으면 실행 중이다.
+    """
+
+    return any(not recorder.finalized for recorder in run_records.values())
+
+
+@router.get("/agent/replicas")
+async def get_replicas():
+    """현재 target-server replica 수(docker compose ps 실제 값). 조회 실패면 null."""
+
+    replicas = await _read_replicas()
+
+    return {
+        "replicas": replicas if replicas >= 1 else None,
+        "busy": _agent_busy() or _replica_reset_in_progress,
+    }
+
+
+@router.post("/agent/replicas/reset")
+async def reset_replicas():
+    """
+    target-server를 1대로 되돌린다 (측정 회차 사이 초기화).
+
+    에이전트 실행 중·승인 대기 중이거나 다른 초기화가 진행 중이면 409로 거부한다.
+    UI 버튼 비활성화만이 아니라 API를 직접 호출해도 실행 중에는 서버 수가 바뀌지 않게 하기 위해서다.
+    """
+    global _replica_reset_in_progress
+
+    if _agent_busy():
+        raise HTTPException(
+            status_code=409,
+            detail="에이전트 실행 중(승인 대기 포함)에는 서버 수를 초기화할 수 없습니다.",
+        )
+
+    if _replica_reset_in_progress:
+        raise HTTPException(status_code=409, detail="서버 수 초기화가 이미 진행 중입니다.")
+
+    _replica_reset_in_progress = True
+    print("[replicas/reset] 수동 초기화 요청: target-server → 1대")
+
+    try:
+        # scale_service는 async지만 안에서 docker compose(--wait 포함, 수 초)를 동기로 실행한다.
+        # 그동안 이벤트 루프가 멈추지 않게 별도 스레드의 이벤트 루프에서 실행한다.
+        result = await asyncio.to_thread(asyncio.run, scale_service(1))
+    finally:
+        _replica_reset_in_progress = False
+
+    print(
+        f"[replicas/reset] before={result.before_replicas} after={result.after_replicas} "
+        f"success={result.success} error={result.error_message}"
+    )
+
+    return {
+        "before_replicas": result.before_replicas,
+        "after_replicas": result.after_replicas,
+        "success": result.success,
+        "error_message": result.error_message,
+    }
 
 
 # =================================================================
@@ -155,6 +373,11 @@ async def get_report(task_id: str):
 
     Phase 3(#75)에서 추가한 필드: measurement_history(라운드별 측정 이력),
     forced_scaling(force_scaling 덮어쓰기 여부), result_file(저장된 결과 파일 경로).
+
+    Phase 4(#75)에서 추가한 필드 (UI 결과 패널용, 결과 파일과 같은 값):
+    conditions, end_reason, user_decision, diagnoses, approvals, scaling_results, revalidations.
+    measurement_history 레코드에는 결과 패널 그래프용 timeseries, endpoints, requests_by_instance가 붙는다.
+    기존 필드는 삭제·이름 변경하지 않는다.
     """
     state = task_manager.states.get(task_id)
 
@@ -238,6 +461,22 @@ async def get_report(task_id: str):
         "forced_scaling": recorder.forced_scaling if recorder else False,
         # 저장된 결과 파일 경로 (repo 루트 기준). 실행이 끝나기 전이거나 저장 실패면 None
         "result_file": recorder.result_file_relative if recorder else None,
+        # ---- Phase 4(#75) 결과 패널용 필드. 결과 파일의 같은 이름 항목과 같은 값이다 ----
+        # 측정 조건 (virtual_users, duration_sec, p95_slo_ms, start_replicas, llm_model 등)
+        "conditions": recorder.conditions if recorder else None,
+        # 종료 경로 (no_scaling_proposed / scaled / rejected / failed 등). 실행이 끝나기 전이면 None
+        "end_reason": recorder.end_reason if recorder else None,
+        # 마지막 승인 요청 기준 사용자 결정 (approved / rejected / no_response / not_applicable)
+        "user_decision": recorder.user_decision if recorder else None,
+        "diagnoses": recorder.diagnoses if recorder else [],          # 라운드별 LLM 원본 판단
+        "approvals": recorder.approvals if recorder else [],          # 승인 요청과 사용자 결정
+        "scaling_results": recorder.scaling_results if recorder else [],
+        "revalidations": recorder.revalidations if recorder else [],  # 재검증 요약 (LLM 변화량 제외)
+        # ---- #83 저신뢰 확인 게이트 ----
+        # 마지막 승인 요청이 신뢰도 기준 미만 스케일링 제안이었는지.
+        # 승인 대기 중이면 /approve에 acknowledge_low_confidence=true가 있어야 승인된다
+        "low_confidence": recorder.low_confidence if recorder else False,
+        "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
     }
 
 
@@ -277,6 +516,10 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
     UI가 종료 이벤트를 받자마자 /report를 조회하므로 저장이 먼저 끝나야 한다.
     이 경로를 거치지 못한 종료(클라이언트 연결 종료 등)는 finally에서 stream_closed로 저장한다.
     저장 실패는 로그만 남기고 흐름을 멈추지 않는다.
+
+    결과 패널 그래프 (docs/03 Phase 4): 부하 테스트 노드를 수집용 노드로 바꿔 넘긴다(engine의 load_test_node 인자).
+    초 단위 시계열·엔드포인트 통계는 부하 테스트와 함께, 서버별 요청 수는 부하 뒤 백그라운드로 모은다.
+    종료 SSE 직전에 늦게 오는 값을 최대 DETAILS_SETTLE_TIMEOUT_SEC 기다린다(_finalize).
     """
 
     # 1. AgentRuntimeState 데이터 초기화
@@ -304,6 +547,35 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         recorder.capture_revalidation(content)
         return content
 
+    # 결과 패널 그래프용 데이터를 함께 모으는 부하 테스트 노드 (docs/03 Phase 4 그래프).
+    # engine 기본 노드(nodes.run_load_test_node)를 그대로 호출하고 Locust 실행 함수만 바꾼다.
+    # Locust 명령과 반환하는 update는 기본 노드와 같다. 추가 수집이 실패해도 부하 테스트 결과와 흐름에는 영향이 없다.
+    async def _capture_load_test(node_state: AgentRuntimeState) -> dict[str, Any]:
+        before = await _read_instance_counts()
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs):
+            result, details = run_load_test_detailed(**kwargs)
+            captured["result"] = result
+            captured["details"] = details
+            return result
+
+        update = await run_load_test_node(node_state, load_test_runner=_runner)
+        load_ended_at = time.monotonic()
+
+        try:
+            result = update.get("load_test_result")
+
+            if result is not None and captured.get("result") is result:
+                entry = recorder.attach_load_test_details(result, captured.get("details"))
+                recorder.track(asyncio.create_task(
+                    _collect_instance_requests(recorder, entry, before, load_ended_at)
+                ))
+        except Exception as exc:
+            print(f"[run_history] 그래프 데이터 연결 실패: {exc}")
+
+        return update
+
     try:
         # =================================================================
         # [1단계: 인프라 헬스체크]
@@ -316,12 +588,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 response = await client.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/", timeout=3.0)
                 if response.status_code not in [200, 302]:
                     message = f"❌ 프로메테우스 인프라 응답 비정상 (Status: {response.status_code})"
-                    recorder.finalize(state, "failed", message)
+                    await _finalize(recorder, state, "failed", message)
                     yield _sse("failed", task_id, message)
                     return
             except (httpx.ConnectError, httpx.TimeoutException):
                 message = "❌ 도커 인프라가 꺼져 있거나 응답이 없습니다! Docker Desktop을 확인해 주세요."
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
@@ -338,12 +610,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         # =================================================================
         yield _sse("analyzing", task_id, f"⚡ 부하 테스트 진행 중... ({duration}초)")
 
-        state = await run_diagnosis(state)
+        state = await run_diagnosis(state, load_test_node=_capture_load_test)
         recorder.observe(state)
 
         if state["agent_outcome"] == "failed":
             message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
-            recorder.finalize(state, "failed", message)
+            await _finalize(recorder, state, "failed", message)
             yield _sse("failed", task_id, message)
             return
 
@@ -362,10 +634,8 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         # 병목 판단 결과만 강제로 덮어쓴다. 이후 로직(승인 대기, execute_scaling_node,
         # 재검증)은 전부 실제 코드 경로를 그대로 탄다 — 가짜인 건 "병목이 있다는 판단"뿐이다.
         #
-        # main.js가 force_scaling=true를 매 요청마다 자동으로 보내기 때문에,
-        # DEBUG_ENDPOINTS_ENABLED가 꺼져있는(=정상적인 프로덕션/일반 사용자) 경우에도
-        # 이 분기를 매번 타게 된다. 화면에 디버그 경고를 노출하면 사용자가 오해할 수
-        # 있으므로, 꺼져있을 땐 조용히 무시하고 서버 콘솔에만 남긴다.
+        # main.js는 URL에 ?debug=1이 있을 때만 force_scaling=true를 보낸다 (Phase 4, #75).
+        # DEBUG_ENDPOINTS_ENABLED가 꺼져 있으면 요청이 와도 조용히 무시하고 서버 콘솔에만 남긴다.
         if force_scaling and not DEBUG_ENDPOINTS_ENABLED:
             print(f"[force_scaling] 무시됨 (DEBUG_ENDPOINTS_ENABLED=false) task_id={task_id}")
 
@@ -414,33 +684,52 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 end_reason = (
                     "no_further_scaling" if recorder.scaling_performed else "no_scaling_proposed"
                 )
-                recorder.finalize(state, end_reason, message)
+                await _finalize(recorder, state, end_reason, message)
                 yield _sse("done", task_id, message)
                 return
 
             if outcome == "failed":
                 message = f"❌ {state.get('error') or '진단에 실패했습니다.'}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
             if outcome != "awaiting_approval":
                 # 예상 못한 상태값에 대한 방어 (engine/nodes 계약이 바뀌었을 가능성)
                 message = f"❌ 알 수 없는 진단 상태입니다: {outcome}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
             # ---- 승인 요청 ----
-            task_manager.create_approval_gate(task_id)
-            recorder.open_approval(state)
+            # 신뢰도 기준 미만 스케일링 제안이면 확인 게이트를 건다 (#83). 기준 이상이면 기존 흐름과 같다
+            low_confidence = _is_low_confidence(state)
+            task_manager.create_approval_gate(task_id, low_confidence=low_confidence)
+            recorder.open_approval(state, low_confidence=low_confidence)
 
             approval_message = state.get("final_answer") or "병목 감지 — 서버 증설이 필요합니다. 승인해주세요."
-            yield _sse("need_approval", task_id, f"⚠️ {approval_message}")
+            diagnosis_report = state.get("bottleneck_report")
+            yield _sse(
+                "need_approval",
+                task_id,
+                f"⚠️ {approval_message}",
+                extra={
+                    "low_confidence": low_confidence,
+                    "confidence": diagnosis_report.confidence if diagnosis_report is not None else None,
+                    "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
+                },
+            )
 
             # 🔒 유저가 위의 approve_task API를 호출해 줄 때까지 락 걸고 대기 (자원 소모 없음)
             approved = await task_manager.wait_for_approval(task_id)
-            recorder.close_approval(approved)
+            recorder.close_approval(
+                approved,
+                acknowledged=(
+                    task_manager.acknowledgements.get(task_id, False)
+                    if low_confidence
+                    else None
+                ),
+            )
 
             # resume_after_approval()이 재검증하면서 load_test_result를 "이후" 값으로
             # 덮어쓰기 전에, "이전" 값을 스냅샷해둔다. (다회차 루프에서도 최초 1회만 저장)
@@ -451,19 +740,20 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
                 state,
                 approved,
                 revalidation_caller=_capture_revalidation,
+                load_test_node=_capture_load_test,
             )
             recorder.observe(state)
 
             if not approved:
                 message = state.get("final_answer") or "서버 증설이 거부되었습니다."
                 message = f"❌ {message}"
-                recorder.finalize(state, "rejected", message)
+                await _finalize(recorder, state, "rejected", message)
                 yield _sse("failed", task_id, message)
                 return
 
             if state["agent_outcome"] == "failed":
                 message = f"❌ {state.get('error') or '스케일링에 실패했습니다.'}"
-                recorder.finalize(state, "failed", message)
+                await _finalize(recorder, state, "failed", message)
                 yield _sse("failed", task_id, message)
                 return
 
@@ -481,7 +771,7 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
             if state["agent_outcome"] == "scaled":
                 summary = state.get("final_answer") or "스케일링 후 성능이 개선됐습니다."
                 message = f"✅ {summary}"
-                recorder.finalize(state, "scaled", message)
+                await _finalize(recorder, state, "scaled", message)
                 yield _sse("done", task_id, message)
                 return
 
@@ -490,11 +780,12 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
             continue
 
     except Exception as exc:
-        # 예상 못한 예외도 실행 기록으로 남긴 뒤 원래대로 전파한다.
+        # 예상 못한 예외도 실행 기록으로 남긴 뒤 원래대로 전파한다 (그래프 데이터는 기다리지 않는다).
         recorder.finalize(state, "failed", f"스트림 처리 중 예외: {exc}")
         raise
 
     finally:
         # 정상 종료 경로는 이미 저장했다(finalize는 멱등). 종료 경로를 거치지 못한 실행
         # (승인 대기·진단 중 클라이언트 연결 종료로 스트림이 닫힌 경우 등)도 결과 파일로 남긴다.
+        # 연결이 끊긴 경우라 늦게 오는 그래프 데이터는 기다리지 않는다.
         recorder.finalize(state, "stream_closed")

@@ -23,6 +23,8 @@ engine은 상태 dict를 제자리에서 갱신하고, 새 측정·진단·스�
 """
 
 import ast
+import asyncio
+import copy
 import json
 import logging
 import os
@@ -338,7 +340,7 @@ class RunRecorder:
             # 진단 시작 전 실제 replica 수. set_start_replicas()로 채운다
             "start_replicas": None,
             "resource_metrics_collected": RESOURCE_METRICS_COLLECTED,
-            # 요청 파라미터. main.js는 항상 true를 보내므로 실제 덮어쓰기 여부는 forced_scaling을 본다
+            # 요청 파라미터 (main.js는 ?debug=1일 때만 true). 실제 덮어쓰기 여부는 forced_scaling을 본다
             "force_scaling_requested": force_scaling_requested,
             "debug_endpoints_enabled": debug_endpoints_enabled,
             "load_target": DEFAULT_HOST,
@@ -354,6 +356,8 @@ class RunRecorder:
 
         self.forced_scaling = False
         self.result_file: Path | None = None
+        # finalize()가 기록하는 종료 경로 (결과 파일 outcome.end_reason). 실행 중이면 None
+        self.end_reason: str | None = None
 
         self._history: list[dict[str, Any]] = []
         self._diagnoses: list[dict[str, Any]] = []
@@ -361,6 +365,13 @@ class RunRecorder:
         self._scaling_results: list[dict[str, Any]] = []
         self._revalidations: list[dict[str, Any]] = []
         self._pending_revalidations: list[str] = []
+
+        # 결과 패널 그래프용 부하 테스트 추가 데이터 (docs/03 Phase 4 그래프).
+        # 항목: {"result": LoadTestResult, "details": {...}, "record": 측정 레코드 dict 또는 None}
+        # LoadTestResult 객체 identity로 측정 레코드와 연결한다
+        self._load_test_details: list[dict[str, Any]] = []
+        # 늦게 끝나는 수집 task (서버별 요청 수). settle()에서 기다린다
+        self._pending_tasks: set[asyncio.Task] = set()
 
         # identity 비교용: 직전에 기록한 객체
         self._last_load_test: LoadTestResult | None = None
@@ -383,6 +394,32 @@ class RunRecorder:
 
         return [dict(record) for record in self._history]
 
+    # 아래 네 속성은 /report(Phase 4 결과 패널)와 결과 파일이 같이 쓴다. 복사본을 돌려준다.
+
+    @property
+    def diagnoses(self) -> list[dict[str, Any]]:
+        """라운드별 LLM 원본 판단 (forced 실행도 LLM 원본 그대로)."""
+
+        return copy.deepcopy(self._diagnoses)
+
+    @property
+    def approvals(self) -> list[dict[str, Any]]:
+        """승인 요청(source: llm/forced, scaling_plan)과 사용자 결정."""
+
+        return copy.deepcopy(self._approvals)
+
+    @property
+    def scaling_results(self) -> list[dict[str, Any]]:
+        """스케일링 실행 결과 (before/after replicas, success)."""
+
+        return copy.deepcopy(self._scaling_results)
+
+    @property
+    def revalidations(self) -> list[dict[str, Any]]:
+        """재검증 LLM 요약과 개선 여부 (LLM이 계산한 변화량은 제외)."""
+
+        return copy.deepcopy(self._revalidations)
+
     @property
     def scaling_performed(self) -> bool:
         """이 실행에서 스케일링이 한 번이라도 성공했는지."""
@@ -403,6 +440,15 @@ class RunRecorder:
         return decision if decision is not None else "no_response"
 
     @property
+    def low_confidence(self) -> bool:
+        """마지막 승인 요청이 신뢰도 기준 미만 스케일링 제안(확인 게이트)이었는지 (#83)."""
+
+        if not self._approvals:
+            return False
+
+        return bool(self._approvals[-1].get("low_confidence"))
+
+    @property
     def result_file_relative(self) -> str | None:
         """저장한 결과 파일 경로 (repo 루트 기준 상대경로). 저장 전·실패 시 None."""
 
@@ -413,6 +459,17 @@ class RunRecorder:
             return self.result_file.relative_to(PROJECT_ROOT).as_posix()
         except ValueError:
             return str(self.result_file)
+
+    @property
+    def finalized(self) -> bool:
+        """
+        실행이 끝났는지 (finalize 호출 여부).
+
+        실행이 끝나는 모든 경로(스트림 종료 포함)에서 finalize되므로, 아직 False면 실행 중(승인 대기 포함)이다.
+        서버 수 초기화 엔드포인트가 실행 중 여부를 판단할 때 쓴다.
+        """
+
+        return self._finalized
 
     def _latest_round(self) -> int | None:
         return self._history[-1]["round"] if self._history else None
@@ -436,8 +493,16 @@ class RunRecorder:
 
         self.forced_scaling = True
 
-    def open_approval(self, state: AgentRuntimeState) -> None:
-        """사용자에게 스케일링 승인을 요청했다."""
+    def open_approval(
+        self,
+        state: AgentRuntimeState,
+        low_confidence: bool = False,
+    ) -> None:
+        """
+        사용자에게 스케일링 승인을 요청했다.
+
+        low_confidence: 신뢰도 기준 미만 스케일링 제안이라 확인 게이트를 걸었는지 (#83).
+        """
 
         try:
             plan = state.get("scaling_plan") or {}
@@ -456,20 +521,28 @@ class RunRecorder:
                         "current_replicas": plan.get("current_replicas"),
                         "desired_replicas": plan.get("desired_replicas"),
                     },
+                    "low_confidence": bool(low_confidence),
+                    # 저신뢰 게이트일 때만 사용자가 보낸 확인 플래그를 기록한다. 게이트가 없으면 None
+                    "acknowledged": None,
                     "decision": None,
                 }
             )
         except Exception:
             logger.exception("승인 요청 기록 실패 task_id=%s", self.task_id)
 
-    def close_approval(self, approved: bool) -> None:
-        """사용자가 승인 또는 거절했다."""
+    def close_approval(
+        self,
+        approved: bool,
+        acknowledged: bool | None = None,
+    ) -> None:
+        """사용자가 승인 또는 거절했다. acknowledged는 저신뢰 확인 플래그 (게이트가 없으면 None)."""
 
         try:
             if self._approvals:
                 self._approvals[-1]["decision"] = (
                     "approved" if approved else "rejected"
                 )
+                self._approvals[-1]["acknowledged"] = acknowledged
         except Exception:
             logger.exception("사용자 결정 기록 실패 task_id=%s", self.task_id)
 
@@ -480,6 +553,81 @@ class RunRecorder:
             self._pending_revalidations.append(str(content))
         except Exception:
             logger.exception("재검증 응답 기록 실패 task_id=%s", self.task_id)
+
+    # ---- 결과 패널 그래프용 데이터 (docs/03 Phase 4 그래프) ----
+
+    def attach_load_test_details(
+        self,
+        result: LoadTestResult,
+        details: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """
+        같은 부하 테스트(LoadTestResult 객체)의 그래프용 추가 데이터(timeseries, endpoints)를 붙인다.
+
+        observe()에서 이 결과로 측정 레코드를 만들 때 함께 저장된다.
+        반환값은 늦게 오는 값(set_instance_requests)을 붙일 때 쓰는 핸들이다.
+        """
+
+        entry: dict[str, Any] = {"result": result, "details": {}, "record": None}
+
+        try:
+            entry["details"] = dict(details or {})
+            self._load_test_details.append(entry)
+        except Exception:
+            logger.exception("그래프 데이터 연결 실패 task_id=%s", self.task_id)
+
+        return entry
+
+    def set_instance_requests(
+        self,
+        entry: dict[str, Any],
+        value: dict[str, Any] | None,
+    ) -> None:
+        """부하 뒤 늦게 수집한 서버별 요청 수를 붙인다. 측정 레코드가 이미 있으면 레코드도 갱신한다."""
+
+        try:
+            entry["details"]["requests_by_instance"] = value
+
+            if entry["record"] is not None:
+                entry["record"]["requests_by_instance"] = value
+        except Exception:
+            logger.exception("서버별 요청 수 기록 실패 task_id=%s", self.task_id)
+
+    def track(self, task: asyncio.Task) -> None:
+        """늦게 끝나는 수집 task를 등록한다. settle()이 기다리고 finalize()가 남은 것을 취소한다."""
+
+        try:
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+        except Exception:
+            logger.exception("수집 task 등록 실패 task_id=%s", self.task_id)
+
+    async def settle(self, timeout: float) -> None:
+        """
+        남은 수집 task를 최대 timeout초 기다린다.
+
+        시간 안에 끝나지 않으면 취소하고 그 값은 null로 둔다 (추정값을 넣지 않는다). 예외를 던지지 않는다.
+        """
+
+        try:
+            pending = [task for task in self._pending_tasks if not task.done()]
+
+            if not pending:
+                return
+
+            _, not_done = await asyncio.wait(pending, timeout=timeout)
+
+            for task in not_done:
+                task.cancel()
+
+            if not_done:
+                logger.warning(
+                    "그래프 데이터 수집이 %s초 안에 끝나지 않아 null로 저장한다 task_id=%s",
+                    timeout,
+                    self.task_id,
+                )
+        except Exception:
+            logger.exception("그래프 데이터 대기 실패 task_id=%s", self.task_id)
 
     def observe(self, state: AgentRuntimeState) -> None:
         """engine 호출이 끝난 상태에서 새로 생긴 스케일링·측정·재검증·진단 결과를 누적한다."""
@@ -576,7 +724,14 @@ class RunRecorder:
         result: LoadTestResult,
         metrics: SystemMetrics | None,
     ) -> dict[str, Any]:
-        return {
+        # 같은 부하 테스트 객체에 붙은 그래프용 데이터 (없으면 세 필드 모두 null)
+        entry = next(
+            (item for item in self._load_test_details if item["result"] is result),
+            None,
+        )
+        details = entry["details"] if entry is not None else {}
+
+        record = {
             "round": len(self._history) + 1,
             # engine은 최초 진단 뒤에는 스케일링 후에만 다시 측정한다
             "phase": "initial" if not self._history else "after_scaling",
@@ -607,7 +762,18 @@ class RunRecorder:
                 if metrics is not None
                 else None
             ),
+            # 결과 패널 그래프용 (docs/03 Phase 4 그래프). 수집하지 못했으면 null.
+            # 이 기능 이전 결과 파일에는 이 필드들이 없다
+            "timeseries": details.get("timeseries"),
+            "endpoints": details.get("endpoints"),
+            # 부하 뒤 늦게 도착하면 set_instance_requests()가 채운다
+            "requests_by_instance": details.get("requests_by_instance"),
         }
+
+        if entry is not None:
+            entry["record"] = record
+
+        return record
 
     def _revalidation_record(self, content: str) -> dict[str, Any]:
         round_number = self._latest_round()
@@ -648,10 +814,10 @@ class RunRecorder:
             "conditions": self.conditions,
             "forced_scaling": self.forced_scaling,
             "measurement_history": self.measurement_history,
-            "diagnoses": self._diagnoses,
-            "approvals": self._approvals,
-            "scaling_results": self._scaling_results,
-            "revalidations": self._revalidations,
+            "diagnoses": self.diagnoses,
+            "approvals": self.approvals,
+            "scaling_results": self.scaling_results,
+            "revalidations": self.revalidations,
             "user_decision": self.user_decision,
             "outcome": {
                 "agent_outcome": state.get("agent_outcome"),
@@ -684,6 +850,11 @@ class RunRecorder:
             return self.result_file
 
         self._finalized = True
+        self.end_reason = end_reason
+
+        # 기다리지 않은 수집 task(스트림 종료 경로 등)는 취소한다. 그 값은 null로 저장된다
+        for task in list(self._pending_tasks):
+            task.cancel()
 
         try:
             self._observe(state)

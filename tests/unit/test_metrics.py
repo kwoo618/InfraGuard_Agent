@@ -117,3 +117,88 @@ def test_resource_metrics_flag_false_while_values_fixed():
     cAdvisor 연동으로 실제 값을 채우는 변경에서 이 테스트도 함께 바꾼다.
     """
     assert gm_module.RESOURCE_METRICS_COLLECTED is False
+
+
+# ── 서버별 요청 분산 (결과 패널 그래프, docs/03 Phase 4) ──────────────────────
+# 아래 카운터 값은 테스트 입력값이며 측정값이 아니다.
+
+def _patch_client(monkeypatch, handler):
+    real_client_cls = httpx.AsyncClient
+
+    def patched_client(**kwargs):
+        return real_client_cls(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(gm_module.httpx, "AsyncClient", patched_client)
+
+
+@pytest.mark.asyncio
+async def test_get_request_counts_by_instance(monkeypatch):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["query"] = request.url.params["query"]
+        return httpx.Response(200, json={
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {"metric": {"instance": "172.18.0.3:8080"}, "value": [1700000000, "420"]},
+                    {"metric": {"instance": "172.18.0.6:8080"}, "value": [1700000000, "15"]},
+                ],
+            },
+        })
+
+    _patch_client(monkeypatch, handler)
+
+    counts = await gm_module.get_request_counts_by_instance()
+
+    assert counts == {"172.18.0.3:8080": 420.0, "172.18.0.6:8080": 15.0}
+    # 서버별로 합산하고, /health(헬스체크)와 /metrics(Prometheus 수집)는 세지 않는다
+    assert "sum by (instance)" in seen["query"]
+    assert 'handler=~"/light|/heavy|/flaky"' in seen["query"]
+
+
+@pytest.mark.asyncio
+async def test_get_request_counts_by_instance_http_error_is_none(monkeypatch):
+    _patch_client(monkeypatch, lambda request: httpx.Response(500))
+
+    assert await gm_module.get_request_counts_by_instance() is None
+
+
+@pytest.mark.asyncio
+async def test_get_request_counts_by_instance_connection_error_is_none(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused")
+
+    _patch_client(monkeypatch, handler)
+
+    assert await gm_module.get_request_counts_by_instance() is None
+
+
+@pytest.mark.asyncio
+async def test_get_request_counts_by_instance_malformed_is_none(monkeypatch):
+    body = {"data": {"result": [{"metric": {}, "value": [1700000000, "x"]}]}}
+    _patch_client(monkeypatch, lambda request: httpx.Response(200, json=body))
+
+    assert await gm_module.get_request_counts_by_instance() is None
+
+
+def test_instance_request_deltas():
+    before = {"172.18.0.3:8080": 1000.0}
+    # 스케일로 새로 뜬 인스턴스(.6)는 부하 전 조회에 없다 → 0에서 시작
+    after = {"172.18.0.3:8080": 1431.0, "172.18.0.6:8080": 428.0}
+
+    assert gm_module.instance_request_deltas(before, after) == {
+        "172.18.0.3:8080": 431,
+        "172.18.0.6:8080": 428,
+    }
+
+
+def test_instance_request_deltas_counter_reset_is_null():
+    # 재시작으로 카운터가 초기화되면 차이가 음수 → 그 인스턴스는 측정값 없음
+    assert gm_module.instance_request_deltas({"a:8080": 500.0}, {"a:8080": 20.0}) == {"a:8080": None}
+
+
+def test_instance_request_deltas_missing_snapshot_is_null():
+    assert gm_module.instance_request_deltas(None, {"a:8080": 1.0}) is None
+    assert gm_module.instance_request_deltas({"a:8080": 1.0}, None) is None

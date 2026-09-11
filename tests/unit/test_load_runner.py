@@ -4,6 +4,8 @@ test_load_runner.py - run_load_test Tool 단위 테스트.
 CONTRIBUTING.md 테스트 규칙에 따라 실제 Locust 프로세스를 띄우지 않고
 subprocess.Popen을 Mock 처리한다 (CPU/시간 비용이 큰 실제 부하 테스트를
 CI에서 매번 돌릴 수 없기 때문).
+
+아래 CSV·요청 기록의 수치는 테스트 입력값이며 측정값이 아니다.
 """
 
 from pathlib import Path
@@ -12,7 +14,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.schemas import LoadTestResult
-from app.tools.run_load_test import MAX_TPS, LoadTestError, run_load_test
+from app.tools.run_load_test import (
+    MAX_TPS,
+    LoadTestError,
+    nearest_rank_percentile,
+    run_load_test,
+    run_load_test_detailed,
+)
 
 # run_load_test._parse_stats_csv가 실제로 파싱하게 될 Locust 표준 stats CSV 포맷.
 # 컬럼 순서/이름은 Locust 라이브러리가 --csv 옵션으로 생성하는 실제 헤더와 동일하게 맞췄다.
@@ -30,7 +38,34 @@ STATS_CSV = (
 )
 
 
-def _fake_popen_factory(tmp_path: Path, returncode: int = 0, write_csv: bool = True):
+def _request_log(start: float = 1000.0) -> str:
+    """locustfile.py 훅이 쓰는 형식의 요청별 원시 기록.
+
+    구간 0초: 응답시간 100, 200, ..., 2000ms 20건 (nearest-rank P95 = 1900)
+    구간 1초: 3건 중 1건 실패
+    구간 2초: 요청 없음
+    구간 3초: 1건
+    """
+    lines = ["event,time,name,response_time_ms,failed", f"start,{start:.6f},,,"]
+
+    for i in range(20):
+        lines.append(f"request,{start + 0.04 * i + 0.01:.6f},/light,{100.0 * (i + 1):.3f},0")
+
+    lines.append(f"request,{start + 1.10:.6f},/heavy,300.000,0")
+    lines.append(f"request,{start + 1.50:.6f},/flaky,50.000,1")
+    lines.append(f"request,{start + 1.99:.6f},/light,10.000,0")
+    lines.append(f"request,{start + 3.20:.6f},/health,5.000,0")
+    lines.append(f"stop,{start + 4.00:.6f},,,")
+
+    return "\n".join(lines) + "\n"
+
+
+def _fake_popen_factory(
+    tmp_path: Path,
+    returncode: int = 0,
+    write_csv: bool = True,
+    requests_log: str | None = None,
+):
     """subprocess.Popen을 대체할 Mock 팩토리 함수를 만든다.
 
     run_load_test()는 내부에서 tempfile.TemporaryDirectory()로 만든 임시 경로를
@@ -47,6 +82,7 @@ def _fake_popen_factory(tmp_path: Path, returncode: int = 0, write_csv: bool = T
             LoadTestError를 던지는 경로를 테스트할 수 있다.
         write_csv: False면 stats CSV를 일부러 쓰지 않아, "결과 파일을 찾을 수 없음"
             에러 경로를 재현한다.
+        requests_log: 주면 locustfile 훅처럼 <prefix>_requests.csv에 이 내용을 쓴다.
     """
 
     def _popen(cmd, cwd=None, stdout=None, stderr=None, text=None):
@@ -64,6 +100,8 @@ def _fake_popen_factory(tmp_path: Path, returncode: int = 0, write_csv: bool = T
             # 여기서는 그 효과만 흉내내서 stats CSV를 직접 작성해준다.
             if write_csv:
                 Path(f"{csv_prefix}_stats.csv").write_text(STATS_CSV, encoding="utf-8")
+            if requests_log is not None:
+                Path(f"{csv_prefix}_requests.csv").write_text(requests_log, encoding="utf-8")
             # subprocess.Popen.communicate()는 (stdout, stderr) 튜플을 반환한다.
             return ("", "" if returncode == 0 else "boom")
 
@@ -139,3 +177,110 @@ def test_run_load_test_raises_when_stats_csv_missing():
     ):
         with pytest.raises(LoadTestError):
             run_load_test(target_tps=10, duration=5)
+
+
+# ----------------------------------------------------------------------
+# run_load_test_detailed — 결과 패널 그래프용 추가 데이터 (docs/03 Phase 4 그래프)
+# ----------------------------------------------------------------------
+
+
+def test_nearest_rank_percentile():
+    values = [float(v) for v in range(1, 21)]   # 1..20
+
+    assert nearest_rank_percentile(values, 0.95) == 19.0   # ceil(0.95 × 20) = 19번째
+    assert nearest_rank_percentile([7.0], 0.95) == 7.0
+    assert nearest_rank_percentile([], 0.95) is None
+
+
+def test_detailed_returns_same_result_with_timeseries_and_endpoints(tmp_path):
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, requests_log=_request_log()),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    # LoadTestResult는 run_load_test와 같다
+    assert result == LoadTestResult(
+        tps=30.0,
+        latency_p95=95.0,
+        latency_avg=150.3,
+        error_rate=5 / 900,
+        duration=5,
+        total_requests=900,
+    )
+
+    timeseries = details["timeseries"]
+
+    assert timeseries["bucket_sec"] == 1
+    assert timeseries["source"] == "locust_request_log"
+    assert timeseries["points"] == [
+        {"t": 0, "requests": 20, "failures": 0, "p95_ms": 1900.0},
+        {"t": 1, "requests": 3, "failures": 1, "p95_ms": 300.0},
+        # 요청이 없는 구간은 0ms가 아니라 None
+        {"t": 2, "requests": 0, "failures": 0, "p95_ms": None},
+        {"t": 3, "requests": 1, "failures": 0, "p95_ms": 5.0},
+    ]
+
+    assert details["endpoints"] == [
+        {
+            "name": "/light",
+            "method": "GET",
+            "requests": 600,
+            "failures": 0,
+            "error_rate": 0.0,
+            "p95_ms": 10.0,
+            "avg_ms": 6.2,
+            "rps": 20.0,
+        },
+        {
+            "name": "/heavy",
+            "method": "GET",
+            "requests": 300,
+            "failures": 5,
+            "error_rate": 5 / 300,
+            "p95_ms": 495.0,
+            "avg_ms": 420.5,
+            "rps": 10.0,
+        },
+    ]
+
+
+def test_detailed_without_request_log_gives_null_timeseries(tmp_path):
+    """요청 기록이 없어도(예: 예전 locustfile) LoadTestResult와 엔드포인트 통계는 정상이다."""
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    assert result.total_requests == 900
+    assert details["timeseries"] is None
+    assert [endpoint["name"] for endpoint in details["endpoints"]] == ["/light", "/heavy"]
+
+
+def test_detailed_with_broken_request_log_gives_null_timeseries(tmp_path):
+    """요청 기록이 깨져 있으면 시계열만 None이고 예외를 던지지 않는다."""
+    broken = "event,time,name,response_time_ms,failed\nstart,not-a-number,,,\n"
+
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, requests_log=broken),
+    ):
+        result, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    assert result.total_requests == 900
+    assert details["timeseries"] is None
+    assert details["endpoints"] is not None
+
+
+def test_detailed_with_start_only_log_gives_null_timeseries(tmp_path):
+    """요청이 한 건도 기록되지 않았으면 시계열은 None (빈 그래프 대신 측정값 없음)."""
+    start_only = "event,time,name,response_time_ms,failed\nstart,1000.0,,,\nstop,1005.0,,,\n"
+
+    with patch(
+        "app.tools.run_load_test.subprocess.Popen",
+        side_effect=_fake_popen_factory(tmp_path, requests_log=start_only),
+    ):
+        _, details = run_load_test_detailed(target_tps=10, duration=5)
+
+    assert details["timeseries"] is None

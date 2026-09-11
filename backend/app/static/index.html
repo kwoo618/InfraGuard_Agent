@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=8">
 </head>
 
 <body>
@@ -17,9 +17,12 @@
 
         <div class="status-panel">
             <span>Agent Status</span>
-            <span id="agent-status" class="status ready">
-                🟢 READY
-            </span>
+            <div class="status-right">
+                <span id="debug-badge" class="debug-badge hidden" title="URL에 ?debug=1이 있어 force_scaling=true를 요청합니다">DEBUG · force_scaling 요청</span>
+                <span id="agent-status" class="status ready">
+                    🟢 READY
+                </span>
+            </div>
         </div>
 
         <div class="progress-timeline">
@@ -78,13 +81,20 @@
         <div class="control-panel">
 
             <div class="input-group">
-                <label for="target-tps-input">목표 TPS</label>
+                <label for="target-tps-input">동시 가상 사용자 수 <span class="input-hint">(Locust 동시 접속 사용자 · 처리량 목표 아님)</span></label>
                 <input type="number" id="target-tps-input" value="30" min="1">
             </div>
 
             <div class="input-group">
                 <label for="duration-input">테스트 시간(초)</label>
                 <input type="number" id="duration-input" value="10" min="1">
+            </div>
+
+            <!-- 현재 서버 수(docker compose 실제 값)와 측정 회차 사이 1대 초기화. 에이전트 실행으로 기록하지 않는다 -->
+            <div class="replica-row">
+                <span class="replica-label">현재 서버</span>
+                <span id="replica-count" class="replica-count">확인 중…</span>
+                <button type="button" id="reset-replicas-btn" class="reset-replicas-btn">서버 1대로 초기화</button>
             </div>
 
             <button id="start-btn">
@@ -102,6 +112,15 @@
                 <div id="progress-bar-fill" class="progress-bar-fill"></div>
             </div>
         </div>
+
+        <!-- 실행 결과 패널 (Phase 4, #75). 리포트 단계에서 result_panel.js가 /report 응답으로 채운다 -->
+        <section id="result-panel" class="result-panel hidden">
+            <div class="result-header">
+                <h3 class="result-title">📊 실행 결과</h3>
+                <a class="grafana-link" href="http://localhost:3000" target="_blank" rel="noopener">Grafana 대시보드 열기 ↗</a>
+            </div>
+            <div id="result-body"></div>
+        </section>
 
     
         <div class="log-container">
@@ -125,6 +144,15 @@
 
             <p id="modal-message"></p>
 
+            <!-- 저신뢰 확인 게이트 (#83): 신뢰도 기준 미만 스케일링 제안일 때만 보인다 -->
+            <div id="low-confidence-box" class="low-confidence-box hidden">
+                <p id="low-confidence-text" class="low-confidence-text"></p>
+                <label class="low-confidence-check" for="low-confidence-ack">
+                    <input type="checkbox" id="low-confidence-ack">
+                    낮은 신뢰도를 확인했습니다
+                </label>
+            </div>
+
             <div class="modal-buttons">
 
                 <button id="approve-btn">
@@ -141,7 +169,9 @@
 
     </div>
 
-    <script src="main.js?v=4"></script>
+    <script src="result_panel.js?v=8"></script>
+    <script src="result_charts.js?v=8"></script>
+    <script src="main.js?v=8"></script>
 
 </body>
 

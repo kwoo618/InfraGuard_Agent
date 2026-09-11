@@ -3,23 +3,29 @@ Phase 3(#75) 라운드별 측정 이력 + 결과 파일 저장 테스트.
 
 - RunRecorder 단위 동작: 측정 불가 표기, replica null, 중복 방지, 파일 저장·실패 처리
 - start_agent_stream 전체 경로: 미제안, 승인→스케일링, 거절, 실패, forced, 저장 실패, 스트림 종료
+- /report 결과 패널용 필드(Phase 4)가 결과 파일과 같은지
+- 저신뢰 확인 게이트(#83): confidence < 0.6 승인은 확인 플래그 필요, 0.6은 게이트 없음, 거절은 항상 허용
 
 실제 Locust·Docker·LLM은 실행하지 않는다. engine 함수·replica 조회·Solar 호출을 가짜로 바꾸고,
 Prometheus 헬스체크는 httpx.MockTransport로 응답한다. 결과 파일은 tmp_path에만 쓴다.
 아래 수치는 테스트 입력값이며 측정값이 아니다.
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.agent import nodes
 from app.agent.state import create_initial_state
 from app.api.v1 import agent, run_history
 from app.api.v1.agent import before_measurements, run_records, task_manager
+from app.main import app
 from app.api.v1.run_history import (
     UNMEASURED_LABEL,
     RunRecorder,
@@ -31,6 +37,7 @@ from app.schemas import (
     ScalingResult,
     SystemMetrics,
 )
+from app.tools.run_load_test import LoadTestError
 
 # agent.httpx.AsyncClient를 바꾸면 httpx 모듈 전체가 바뀌므로 원본을 먼저 잡아 둔다.
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -62,6 +69,8 @@ SCALING_PLAN = {
 def _clear_agent_storage() -> None:
     task_manager.states.clear()
     task_manager.futures.clear()
+    task_manager.low_confidence.clear()
+    task_manager.acknowledgements.clear()
     before_measurements.clear()
     run_records.clear()
 
@@ -135,12 +144,12 @@ def _metrics(connections: int) -> SystemMetrics:
     )
 
 
-def _report(requires_scaling: bool) -> BottleneckReport:
+def _report(requires_scaling: bool, confidence: float = 0.8) -> BottleneckReport:
     return BottleneckReport(
         cause="테스트 원인",
         severity="high",
         recommendation="테스트 권장 조치",
-        confidence=0.8,
+        confidence=confidence,
         requires_scaling=requires_scaling,
     )
 
@@ -168,10 +177,12 @@ def _recorder(task_id: str = "task-1") -> RunRecorder:
 def _fake_diagnosis(
     *,
     requires_scaling: bool = False,
+    confidence: float = 0.8,
     fail_before_load: bool = False,
     fail_after_load: bool = False,
 ):
-    async def fake_run_diagnosis(state):
+    # agent.py는 부하 테스트 수집용 load_test_node를 kwargs로 넘긴다. 이 가짜는 부하 테스트를 흉내만 내므로 쓰지 않는다
+    async def fake_run_diagnosis(state, **kwargs):
         if fail_before_load:
             state.update(
                 agent_outcome="failed",
@@ -190,7 +201,7 @@ def _fake_diagnosis(
             )
             return state
 
-        state["bottleneck_report"] = _report(requires_scaling)
+        state["bottleneck_report"] = _report(requires_scaling, confidence)
         state["loop_count"] += 1
 
         if requires_scaling:
@@ -278,6 +289,25 @@ def _only_result_file(directory: Path) -> dict:
     files = sorted(directory.glob("*.json"))
     assert len(files) == 1, files
     return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+async def _assert_report_matches_file(data: dict) -> dict:
+    """/report 기존 필드가 유지되고, 결과 패널용 필드(Phase 4)가 결과 파일과 같은지 확인한다."""
+
+    report = await agent.get_report(data["task_id"])
+
+    assert EXISTING_REPORT_FIELDS <= report.keys()
+    assert report["measurement_history"] == data["measurement_history"]
+    assert report["forced_scaling"] == data["forced_scaling"]
+    assert report["conditions"] == data["conditions"]
+    assert report["end_reason"] == data["outcome"]["end_reason"]
+    assert report["user_decision"] == data["user_decision"]
+    assert report["diagnoses"] == data["diagnoses"]
+    assert report["approvals"] == data["approvals"]
+    assert report["scaling_results"] == data["scaling_results"]
+    assert report["revalidations"] == data["revalidations"]
+
+    return report
 
 
 # ----------------------------------------------------------------------
@@ -499,6 +529,13 @@ async def test_stream_no_scaling_proposed_saves_file(
     assert data["outcome"]["agent_outcome"] == "diagnosed"
     assert data["outcome"]["end_reason"] == "no_scaling_proposed"
 
+    report = await _assert_report_matches_file(data)
+
+    assert report["end_reason"] == "no_scaling_proposed"
+    assert report["user_decision"] == "not_applicable"
+    assert report["conditions"]["p95_slo_ms"] == 1000
+    assert report["conditions"]["virtual_users"] == 50
+
 
 async def test_stream_approved_scaling_records_two_rounds_and_report(
     results_dir,
@@ -532,6 +569,9 @@ async def test_stream_approved_scaling_records_two_rounds_and_report(
             "round": 1,
             "source": "llm",
             "scaling_plan": {"current_replicas": 1, "desired_replicas": 2},
+            # 신뢰도 0.8 (기준 이상) → 확인 게이트 없음 (#83)
+            "low_confidence": False,
+            "acknowledged": None,
             "decision": "approved",
         }
     ]
@@ -557,10 +597,11 @@ async def test_stream_approved_scaling_records_two_rounds_and_report(
     assert data["outcome"]["agent_outcome"] == "scaled"
     assert data["outcome"]["end_reason"] == "scaled"
 
-    report = await agent.get_report(data["task_id"])
+    report = await _assert_report_matches_file(data)
 
-    assert EXISTING_REPORT_FIELDS <= report.keys()
-    assert report["measurement_history"] == history
+    assert report["end_reason"] == "scaled"
+    assert report["user_decision"] == "approved"
+    assert report["scaling_results"][0]["after_replicas"] == 2
     assert report["measurement"]["tps"] == history[0]["tps"]
     assert report["measurement_after"]["tps"] == history[1]["tps"]
     assert report["forced_scaling"] is False
@@ -593,6 +634,17 @@ async def test_stream_rejected_keeps_diagnosed_outcome(
     assert data["outcome"]["agent_outcome"] == "diagnosed"
     assert data["outcome"]["end_reason"] == "rejected"
 
+    report = await _assert_report_matches_file(data)
+
+    # 거절이면 state outcome은 diagnosed지만 /report의 end_reason·user_decision으로 구분된다
+    assert report["outcome"] == "diagnosed"
+    assert report["end_reason"] == "rejected"
+    assert report["user_decision"] == "rejected"
+    assert report["approvals"][0]["scaling_plan"] == {
+        "current_replicas": 1,
+        "desired_replicas": 2,
+    }
+
 
 @pytest.mark.parametrize(
     ("fail_before_load", "expected_rounds"),
@@ -624,6 +676,11 @@ async def test_stream_failed_diagnosis_saves_file(
     assert data["outcome"]["agent_outcome"] == "failed"
     assert data["outcome"]["end_reason"] == "failed"
     assert data["outcome"]["error"]
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["end_reason"] == "failed"
+    assert report["error"] == data["outcome"]["error"]
 
 
 async def test_stream_infra_check_failure_saves_file(results_dir, monkeypatch):
@@ -672,9 +729,10 @@ async def test_stream_forced_scaling_is_recorded(
     assert data["diagnoses"][0]["requires_scaling"] is False
     assert data["outcome"]["end_reason"] == "scaled"
 
-    report = await agent.get_report(data["task_id"])
+    report = await _assert_report_matches_file(data)
 
     assert report["forced_scaling"] is True
+    assert report["approvals"][0]["source"] == "forced"
 
 
 async def test_stream_force_request_without_debug_is_not_forced(
@@ -737,8 +795,17 @@ async def test_stream_closed_while_waiting_for_approval_saves_file(
     stream = agent.start_agent_stream(target_tps=50, duration=10)
 
     async for frame in stream:
-        if _parse(frame)["status"] == "need_approval":
+        event = _parse(frame)
+        if event["status"] == "need_approval":
             break
+
+    # 실행이 끝나기 전 /report: end_reason·result_file은 아직 없고 승인 요청은 결정 전이다
+    report = await agent.get_report(event["task_id"])
+
+    assert report["waiting_for_approval"] is True
+    assert report["end_reason"] is None
+    assert report["result_file"] is None
+    assert report["approvals"][0]["decision"] is None
 
     # 승인 대기 중 클라이언트가 연결을 끊은 경우
     await stream.aclose()
@@ -749,3 +816,400 @@ async def test_stream_closed_while_waiting_for_approval_saves_file(
     assert data["user_decision"] == "no_response"
     assert data["outcome"]["agent_outcome"] == "awaiting_approval"
     assert data["outcome"]["end_reason"] == "stream_closed"
+
+
+# ----------------------------------------------------------------------
+# 저신뢰 확인 게이트 (#83): confidence < LOW_CONFIDENCE_THRESHOLD(0.6)인 스케일링 제안.
+# 실측 confidence는 80~95%라 UI로는 확인하기 어려워 단위 테스트로 검증한다 (docs/02 ISSUE-13).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("requires_scaling", "confidence", "expected"),
+    [
+        (True, 0.59, True),
+        (True, 0.6, False),    # 경계값은 게이트 대상이 아니다
+        (True, 0.95, False),
+        (False, 0.3, False),   # 스케일링 제안이 아니면 게이트 없음 (forced 덮어쓰기 포함)
+    ],
+)
+def test_is_low_confidence(requires_scaling, confidence, expected):
+    state = _state_with(
+        _load_result(50.0, 3000.0),
+        _metrics(40),
+        _report(requires_scaling, confidence),
+    )
+
+    assert agent.LOW_CONFIDENCE_THRESHOLD == 0.6
+    assert agent._is_low_confidence(state) is expected
+
+
+def test_is_low_confidence_without_report():
+    assert agent._is_low_confidence(_state_with(None, None)) is False
+
+
+async def test_low_confidence_approval_requires_acknowledgement(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.59),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    events = []
+
+    async for frame in agent.start_agent_stream(target_tps=50, duration=10):
+        event = _parse(frame)
+        events.append(event)
+
+        if event["status"] != "need_approval":
+            continue
+
+        task_id = event["task_id"]
+
+        assert event["low_confidence"] is True
+        assert event["confidence"] == 0.59
+        assert event["low_confidence_threshold"] == 0.6
+
+        report = await agent.get_report(task_id)
+
+        assert report["low_confidence"] is True
+        assert report["waiting_for_approval"] is True
+
+        # 확인 플래그 없는 승인은 API에서 400. 승인 대기는 그대로 남는다 (UI 우회 방지)
+        with pytest.raises(HTTPException) as exc_info:
+            await agent.approve_task(
+                agent.ApprovalRequest(task_id=task_id, approved=True)
+            )
+
+        assert exc_info.value.status_code == 400
+        assert not task_manager.futures[task_id].done()
+
+        response = await agent.approve_task(
+            agent.ApprovalRequest(
+                task_id=task_id,
+                approved=True,
+                acknowledge_low_confidence=True,
+            )
+        )
+
+        assert response["status"] == "success"
+
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is True
+    assert approval["acknowledged"] is True
+    assert approval["decision"] == "approved"
+    assert data["outcome"]["end_reason"] == "scaled"
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["low_confidence"] is True
+    assert report["low_confidence_threshold"] == 0.6
+
+
+async def test_confidence_at_threshold_has_no_gate(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.6),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    # _run_stream은 확인 플래그 없이 승인한다 → 경계값 0.6은 기존처럼 바로 승인된다
+    events = await _run_stream(decision=True)
+    [need_approval] = [e for e in events if e["status"] == "need_approval"]
+
+    assert need_approval["low_confidence"] is False
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is False
+    assert approval["acknowledged"] is None
+    assert approval["decision"] == "approved"
+
+    report = await _assert_report_matches_file(data)
+
+    assert report["low_confidence"] is False
+
+
+async def test_low_confidence_rejection_needs_no_acknowledgement(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        agent,
+        "run_diagnosis",
+        _fake_diagnosis(requires_scaling=True, confidence=0.59),
+    )
+    monkeypatch.setattr(agent, "resume_after_approval", _fake_resume())
+
+    # _run_stream은 확인 플래그 없이 거절한다 → 거절은 항상 받는다
+    events = await _run_stream(decision=False)
+
+    assert events[-1]["status"] == "failed"
+
+    data = _only_result_file(results_dir)
+    [approval] = data["approvals"]
+
+    assert approval["low_confidence"] is True
+    assert approval["acknowledged"] is False
+    assert approval["decision"] == "rejected"
+    assert data["outcome"]["end_reason"] == "rejected"
+
+
+def test_approve_endpoint_returns_400_over_http():
+    """HTTP 경로로도 확인 플래그 없는 저신뢰 승인은 400이고 승인 대기가 유지된다."""
+
+    loop = asyncio.new_event_loop()
+
+    try:
+        task_id = "low-confidence-task"
+        task_manager.states[task_id] = create_initial_state(target_tps=50, duration=10)
+        task_manager.futures[task_id] = loop.create_future()
+        task_manager.low_confidence[task_id] = True
+
+        response = TestClient(app).post(
+            "/api/v1/agent/approve",
+            json={"task_id": task_id, "approved": True},
+        )
+
+        assert response.status_code == 400
+        assert "acknowledge_low_confidence" in response.json()["detail"]
+        assert not task_manager.futures[task_id].done()
+    finally:
+        loop.close()
+
+
+# ----------------------------------------------------------------------
+# 결과 패널 그래프용 데이터 (docs/03 Phase 4 그래프)
+# 초 단위 시계열·엔드포인트 통계(부하 테스트와 함께)와 서버별 요청 수(부하 뒤 백그라운드).
+# 아래 값은 테스트 입력값이며 측정값이 아니다.
+# ----------------------------------------------------------------------
+
+GRAPH_DETAILS = {
+    "timeseries": {
+        "bucket_sec": 1,
+        "source": "locust_request_log",
+        "percentile": "nearest_rank_p95",
+        "points": [{"t": 0, "requests": 40, "failures": 0, "p95_ms": 2900.0}],
+    },
+    "endpoints": [
+        {
+            "name": "/heavy",
+            "method": "GET",
+            "requests": 120,
+            "failures": 0,
+            "error_rate": 0.0,
+            "p95_ms": 4100.0,
+            "avg_ms": 1500.0,
+            "rps": 12.0,
+        }
+    ],
+}
+
+INSTANCE_BEFORE = {"172.18.0.3:8080": 1000.0}
+INSTANCE_AFTER = {"172.18.0.3:8080": 1420.0}
+
+
+def _fake_diagnosis_using_load_node(requires_scaling: bool = False):
+    """agent.py가 넘긴 load_test_node(그래프 데이터 수집 노드)를 engine처럼 호출하는 가짜 진단."""
+
+    async def fake_run_diagnosis(state, load_test_node=None, **kwargs):
+        state.update(await load_test_node(state))
+
+        if state["agent_outcome"] == "failed":
+            return state
+
+        state["system_metrics"] = _metrics(40)
+        state["bottleneck_report"] = _report(requires_scaling)
+        state["loop_count"] += 1
+        state.update(agent_outcome="diagnosed", final_answer="진단 완료: 병목 없음")
+        return state
+
+    return fake_run_diagnosis
+
+
+@pytest.fixture
+def fake_load_test(monkeypatch):
+    """run_load_test_detailed와 인스턴스별 요청 카운터(부하 전 → 부하 후 순서)를 가짜로 둔다."""
+
+    snapshots = [dict(INSTANCE_BEFORE), dict(INSTANCE_AFTER)]
+
+    def fake_detailed(target_tps, duration):
+        return _load_result(50.0, 3000.0), json.loads(json.dumps(GRAPH_DETAILS))
+
+    async def fake_counts():
+        return snapshots.pop(0) if snapshots else None
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", fake_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", fake_counts)
+    monkeypatch.setattr(agent, "INSTANCE_SNAPSHOT_DELAY_SEC", 0.0)
+    return snapshots
+
+
+def test_measurement_record_without_details_has_null_graph_fields():
+    """그래프 데이터가 붙지 않은 측정(예: 가짜 부하 테스트)은 세 필드가 null이다."""
+
+    recorder = _recorder()
+    recorder.observe(_state_with(_load_result(50.0, 3000.0), _metrics(40), _report(False)))
+
+    [record] = recorder.measurement_history
+
+    assert record["timeseries"] is None
+    assert record["endpoints"] is None
+    assert record["requests_by_instance"] is None
+
+
+def test_late_instance_requests_update_existing_record():
+    """서버별 요청 수는 측정 레코드가 만들어진 뒤에 도착해도 그 레코드에 붙는다."""
+
+    recorder = _recorder()
+    load = _load_result(50.0, 3000.0)
+    entry = recorder.attach_load_test_details(load, json.loads(json.dumps(GRAPH_DETAILS)))
+
+    recorder.observe(_state_with(load, _metrics(40), _report(False)))
+
+    [record] = recorder.measurement_history
+
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["endpoints"] == GRAPH_DETAILS["endpoints"]
+    assert record["requests_by_instance"] is None
+
+    recorder.set_instance_requests(entry, {"counts": {"172.18.0.3:8080": 420}})
+
+    assert recorder.measurement_history[0]["requests_by_instance"] == {
+        "counts": {"172.18.0.3:8080": 420}
+    }
+
+
+async def test_stream_saves_graph_data_with_measurement(
+    results_dir,
+    fake_infra,
+    fake_load_test,
+    monkeypatch,
+):
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    data = _only_result_file(results_dir)
+    [record] = data["measurement_history"]
+
+    # LoadTestResult 값은 그대로다
+    assert record["tps"] == 50.0
+    assert record["latency_p95"] == 3000.0
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["endpoints"] == GRAPH_DETAILS["endpoints"]
+    assert record["requests_by_instance"] == {
+        "handlers": ["/light", "/heavy", "/flaky"],
+        "excluded": ["/health", "/metrics"],
+        "counts": {"172.18.0.3:8080": 420},
+    }
+
+    await _assert_report_matches_file(data)
+
+
+async def test_stream_saves_null_when_instance_snapshot_is_late(
+    results_dir,
+    fake_infra,
+    fake_load_test,
+    monkeypatch,
+):
+    """부하 뒤 서버별 조회가 기다리는 시간보다 늦으면 null로 저장하고 흐름은 끝까지 간다."""
+
+    calls = []
+
+    async def slow_after_counts():
+        calls.append(1)
+        if len(calls) == 1:
+            return dict(INSTANCE_BEFORE)
+        await asyncio.sleep(5)
+        return dict(INSTANCE_AFTER)
+
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", slow_after_counts)
+    monkeypatch.setattr(agent, "DETAILS_SETTLE_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    [record] = _only_result_file(results_dir)["measurement_history"]
+
+    assert record["timeseries"] == GRAPH_DETAILS["timeseries"]
+    assert record["requests_by_instance"] is None
+
+
+async def test_stream_continues_when_graph_collection_fails(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    """Prometheus 조회가 예외를 던지고 Locust 추가 데이터가 없어도 부하 테스트 결과와 흐름은 그대로다."""
+
+    def fake_detailed(target_tps, duration):
+        return _load_result(50.0, 3000.0), {"timeseries": None, "endpoints": None}
+
+    async def broken_counts():
+        raise RuntimeError("prometheus down")
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", fake_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", broken_counts)
+    monkeypatch.setattr(agent, "INSTANCE_SNAPSHOT_DELAY_SEC", 0.0)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    [record] = _only_result_file(results_dir)["measurement_history"]
+
+    assert record["tps"] == 50.0
+    assert record["timeseries"] is None
+    assert record["endpoints"] is None
+    assert record["requests_by_instance"] is None
+
+
+async def test_stream_load_test_failure_through_capture_node(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    """수집 노드를 거쳐도 Locust 실패는 기존과 같이 실패 경로로 끝난다."""
+
+    def failing_detailed(target_tps, duration):
+        raise LoadTestError("Locust 결과 파일을 찾을 수 없습니다")
+
+    async def counts():
+        return {}
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", failing_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", counts)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "failed"
+
+    data = _only_result_file(results_dir)
+
+    assert data["measurement_history"] == []
+    assert data["outcome"]["end_reason"] == "failed"
+    assert "부하 테스트 실행 실패" in data["outcome"]["error"]

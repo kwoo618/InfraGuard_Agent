@@ -4,10 +4,24 @@ const approvalModal = document.getElementById('approval-modal');
 const modalMessage = document.getElementById('modal-message');
 const approveBtn = document.getElementById('approve-btn');
 const rejectBtn = document.getElementById('reject-btn');
+const lowConfidenceBox = document.getElementById('low-confidence-box');
+const lowConfidenceText = document.getElementById('low-confidence-text');
+const lowConfidenceAck = document.getElementById('low-confidence-ack');
+const replicaCount = document.getElementById('replica-count');
+const resetReplicasBtn = document.getElementById('reset-replicas-btn');
 
 
 
 const statusLabel = document.getElementById("agent-status");
+
+// URL에 ?debug=1이 있으면 디버그 모드: 진단 요청에 force_scaling=true를 붙인다.
+// 발표·측정 화면에서 실수로 켜져 있지 않은지 보이도록 상태 표시줄에 배지를 띄운다.
+const DEBUG_MODE = new URLSearchParams(window.location.search).get('debug') === '1';
+
+if (DEBUG_MODE) {
+    const debugBadge = document.getElementById('debug-badge');
+    if (debugBadge) debugBadge.classList.remove('hidden');
+}
 
 
 const steps = [
@@ -22,6 +36,109 @@ const steps = [
 
 let currentTaskId = null;
 let eventSource = null;
+
+// 저신뢰 확인 게이트 (#83): 현재 승인 요청이 신뢰도 기준 미만 스케일링 제안인지.
+// UI는 체크박스를 누르기 전까지 승인 버튼을 막고, 서버(/approve)도 확인 플래그 없는 승인을 400으로 막는다.
+let pendingLowConfidence = false;
+
+function syncApproveButton() {
+    approveBtn.disabled = pendingLowConfidence && !lowConfidenceAck.checked;
+}
+
+function setupLowConfidenceGate(data) {
+    pendingLowConfidence = data.low_confidence === true;
+    lowConfidenceAck.checked = false;
+
+    if (pendingLowConfidence) {
+        const confidence = fmtConfidence(data.confidence);   // result_panel.js
+        const threshold = typeof data.low_confidence_threshold === 'number'
+            ? `${Math.round(data.low_confidence_threshold * 100)}%`
+            : '';
+        lowConfidenceText.textContent = `⚠ AI 신뢰도 ${confidence} — 기준 ${threshold} 미만`;
+        lowConfidenceBox.classList.remove('hidden');
+    } else {
+        lowConfidenceText.textContent = '';
+        lowConfidenceBox.classList.add('hidden');
+    }
+
+    syncApproveButton();
+}
+
+lowConfidenceAck.addEventListener('change', syncApproveButton);
+
+// 현재 서버 수 표시 · 1대 초기화 (측정 회차 사이 사람의 수동 조작, 결과 파일에 기록하지 않음).
+// 에이전트 실행 중(승인 대기 포함)이거나 초기화 중이면 버튼을 막는다. 서버도 409로 거부한다.
+let agentRunning = false;
+let replicaResetting = false;
+let serverBusy = false;   // /agent/replicas의 busy (다른 탭에서 실행 중인 경우 포함)
+
+function syncResetButton() {
+    resetReplicasBtn.disabled = agentRunning || replicaResetting || serverBusy;
+}
+
+function setAgentRunning(running) {
+    const wasRunning = agentRunning;
+    agentRunning = running;
+    syncResetButton();
+    // 실행이 끝날 때마다 실제 서버 수를 다시 읽는다
+    if (wasRunning && !running) {
+        refreshReplicas();
+    }
+}
+
+async function refreshReplicas() {
+    try {
+        const response = await fetch('/api/v1/agent/replicas');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        replicaCount.textContent = typeof data.replicas === 'number' ? `${data.replicas}대` : '조회 실패';
+        serverBusy = data.busy === true;
+    } catch (error) {
+        console.warn('[replicas] 조회 실패:', error);
+        replicaCount.textContent = '조회 실패';
+        serverBusy = false;
+    }
+    syncResetButton();
+}
+
+resetReplicasBtn.addEventListener('click', async () => {
+    if (resetReplicasBtn.disabled) return;
+
+    const confirmed = window.confirm(
+        `서버(target-server)를 1대로 초기화합니다. (현재 ${replicaCount.textContent})\n`
+        + '측정 회차 사이에만 사용하세요. 결과 파일에는 기록되지 않습니다. 계속할까요?'
+    );
+    if (!confirmed) return;
+
+    replicaResetting = true;
+    startBtn.disabled = true;
+    syncResetButton();
+    replicaCount.textContent = '초기화 중…';
+    appendLog('서버 1대로 초기화 요청', 'system');
+
+    try {
+        const response = await fetch('/api/v1/agent/replicas/reset', { method: 'POST' });
+        const result = await response.json();
+
+        if (!response.ok) {
+            appendLog(result.detail || '서버 수 초기화가 거부되었습니다.', 'error');
+        } else if (result.success) {
+            appendLog(`서버 수 초기화 완료: ${result.before_replicas}대 → ${result.after_replicas}대`, 'success');
+        } else {
+            appendLog(`서버 수 초기화 실패: ${result.error_message || '원인 미상'}`, 'error');
+        }
+    } catch (error) {
+        appendLog('서버 수 초기화 요청 실패', 'error');
+    } finally {
+        replicaResetting = false;
+        startBtn.disabled = agentRunning;
+        await refreshReplicas();
+    }
+});
+
+refreshReplicas();
 
 // 부하 테스트 프로그레스 바 타이머
 let loadTestTimer = null;
@@ -155,6 +272,10 @@ function updateStatus(text, cls) {
     statusLabel.className = `status ${cls}`;
     statusLabel.innerHTML = text;
 
+    // 진행 중 상태(RUNNING·WAITING·SCALING)면 에이전트 실행 중으로 보고 서버 초기화 버튼을 막는다.
+    // 끝난 상태(COMPLETED·ERROR)로 바뀌면 실제 서버 수를 다시 읽는다.
+    setAgentRunning(['running', 'waiting', 'scaling'].includes(cls));
+
 }
 
 
@@ -250,6 +371,14 @@ async function fetchReport(taskId) {
             });
         }
 
+        // 결과 패널 (Phase 4, #75, result_panel.js). 위의 로그 출력은 그대로 두고 패널을 추가로 그린다.
+        try {
+            renderResultPanel(report);
+        } catch (panelError) {
+            console.error('[result-panel] 렌더링 실패:', panelError);
+            appendLog("결과 패널을 표시하지 못했습니다. (로그의 결과는 위와 같습니다)", "error");
+        }
+
     } catch (error) {
         appendLog("리포트 조회 중 오류가 발생했습니다.", "error");
     }
@@ -263,6 +392,7 @@ startBtn.addEventListener('click', () => {
 
     resetProgress();
     resetLoadTestProgress();
+    resetResultPanel();
 
     appendLog('자율 진단 시스템 가동 요청 중...', 'system');
 
@@ -291,12 +421,17 @@ startBtn.addEventListener('click', () => {
         eventSource.close();
     }
 
-    // force_scaling=true는 항상 요청하지만, 실제로 힘을 쓰는지는 서버의
-    // DEBUG_ENDPOINTS_ENABLED(.env)가 결정한다. 꺼져있으면 서버가 조용히 무시하고
-    // 평소처럼 실제 LLM 판단대로 진행되므로, 매번 붙여 보내도 안전하다.
-    eventSource = new EventSource(
-        `/api/v1/agent/start?target_tps=${encodeURIComponent(targetTps)}&duration=${encodeURIComponent(duration)}&force_scaling=true`
-    );
+    // force_scaling은 URL에 ?debug=1이 있을 때만 보낸다 (디버그 전용).
+    // 예전에는 매 요청 보냈는데, 서버 DEBUG_ENDPOINTS_ENABLED가 켜진 채로 발표·측정하면
+    // LLM 판단이 덮어써질 위험이 있어서 없앴다. 실제 덮어쓰기 여부는 여전히 서버 설정이 결정한다.
+    const params = new URLSearchParams({
+        target_tps: String(targetTps),   // Locust 동시 가상 사용자 수 (처리량 목표 아님, docs/02 ISSUE-11)
+        duration: String(duration),
+    });
+    if (DEBUG_MODE) {
+        params.set('force_scaling', 'true');
+    }
+    eventSource = new EventSource(`/api/v1/agent/start?${params.toString()}`);
 
     eventSource.onmessage = function (event) {
         const data = JSON.parse(event.data);
@@ -353,6 +488,10 @@ startBtn.addEventListener('click', () => {
             appendLog(data.message, 'warning');
             currentTaskId = data.task_id;
             modalMessage.innerText = data.message;
+            setupLowConfidenceGate(data);
+            if (pendingLowConfidence) {
+                appendLog(`${lowConfidenceText.textContent} — 승인하려면 낮은 신뢰도 확인이 필요합니다.`, 'warning');
+            }
             completeStep("step-ai");
             activateStep("step-plan");
             completeStep("step-plan");
@@ -446,13 +585,22 @@ approveBtn.addEventListener('click', async () => {
             body: JSON.stringify({
 
                 task_id: currentTaskId,
-                approved: true
+                approved: true,
+                // 저신뢰 확인 게이트(#83): 체크박스를 눌렀을 때만 true. 없으면 서버가 400으로 막는다
+                acknowledge_low_confidence: pendingLowConfidence && lowConfidenceAck.checked
 
             })
 
         });
 
         const result = await response.json();
+
+        if (!response.ok) {
+            // 400: 저신뢰 제안을 확인 없이 승인한 경우 (#83). 승인 대기가 유지되므로 모달을 다시 연다
+            appendLog(result.detail || '승인 요청이 거부되었습니다.', 'error');
+            approvalModal.classList.remove('hidden');
+            return;
+        }
 
         // 성공 시엔 별도 로그 없이(이후 'scaling' 이벤트가 곧 뜬다), 실패했을 때만 로그로 알려준다.
         if (result.status !== 'success') {
@@ -476,8 +624,9 @@ approveBtn.addEventListener('click', async () => {
     }
 
     finally {
-        approveBtn.disabled = false;
         rejectBtn.disabled = false;
+        // 저신뢰 게이트면 체크박스 상태를 따른다 (#83)
+        syncApproveButton();
     }
 
 });
@@ -507,7 +656,9 @@ rejectBtn.addEventListener('click', async () => {
             body: JSON.stringify({
 
                 task_id: currentTaskId,
-                approved: false
+                approved: false,
+                // 거절은 확인 플래그 없이 받는다. 결과 파일 acknowledged 기록용으로 체크 상태만 함께 보낸다 (#83)
+                acknowledge_low_confidence: pendingLowConfidence && lowConfidenceAck.checked
 
             })
 
@@ -528,9 +679,8 @@ rejectBtn.addEventListener('click', async () => {
     }
 
     finally {
-        approveBtn.disabled = false;
         rejectBtn.disabled = false;
-
+        syncApproveButton();
     }
 
 });
