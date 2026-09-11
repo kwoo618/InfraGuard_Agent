@@ -8,15 +8,27 @@ Locust의 CSV 통계 출력을 파싱해 LoadTestResult로 변환한다.
 `infra/locust/locustfile.py` 시나리오를 headless 모드(`-f`, `--headless`)로
 서브프로세스 실행하고, `--csv` 옵션으로 떨어지는 `<prefix>_stats.csv`의
 Aggregated 행을 읽어 TPS/Latency/에러율을 계산한다.
+
+결과 패널 그래프용 추가 데이터 (docs/03 Phase 4 그래프, #75):
+run_load_test_detailed()는 같은 실행에서 LoadTestResult와 함께
+- 초 단위 TPS·P95 시계열: locustfile이 쓰는 `<prefix>_requests.csv`(요청별 원시 기록)
+- 엔드포인트별 통계: `<prefix>_stats.csv`의 엔드포인트 행
+을 돌려준다. LoadTestResult(schemas.py)는 바꾸지 않는다. 추가 데이터 파싱이 실패해도
+LoadTestResult는 그대로 반환하고 해당 항목만 None이다.
 """
 
 import csv
+import logging
+import math
 import os
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from app.schemas import LoadTestResult
+
+logger = logging.getLogger(__name__)
 
 # CLAUDE.md 가드레일: "Locust 부하 상한 50 TPS" — 로컬 PC 한 대에서
 # Locust + target-server + Prometheus + 백엔드를 동시에 돌리기 때문에
@@ -37,6 +49,13 @@ LOCUSTFILE = LOCUST_DIR / "locustfile.py"
 
 # .env의 TARGET_SERVER_URL을 우선 사용하고, 없으면 docker-compose 기본 포트(8080)로 폴백.
 DEFAULT_HOST = os.getenv("TARGET_SERVER_URL", "http://localhost:8080")
+
+# locustfile.py REQUEST_LOG_SUFFIX와 같아야 한다 (locust를 import하지 않으려고 값을 따로 둔다)
+REQUEST_LOG_SUFFIX = "_requests.csv"
+
+# 초 단위 시계열 구간 길이(초)와 P95 계산 방식
+TIMESERIES_BUCKET_SEC = 1
+TIMESERIES_PERCENTILE = 0.95
 
 
 class LoadTestError(RuntimeError):
@@ -75,6 +94,39 @@ def run_load_test(
         LoadTestError: Locust 프로세스가 비정상 종료했거나, 타임아웃됐거나,
             결과 CSV 파싱에 실패한 경우.
     """
+    result, _ = _run_locust(target_tps, duration, host, spawn_rate, collect_details=False)
+    return result
+
+
+def run_load_test_detailed(
+    target_tps: int,
+    duration: int,
+    host: str = DEFAULT_HOST,
+    spawn_rate: int | None = None,
+) -> tuple[LoadTestResult, dict[str, Any]]:
+    """run_load_test와 같은 부하 테스트를 실행하고, 결과 패널 그래프용 추가 데이터도 함께 반환한다.
+
+    Returns:
+        (LoadTestResult, details)
+        - LoadTestResult: run_load_test와 같은 값
+        - details["timeseries"]: 초 단위 요청 수·실패 수·P95 (요청별 원시 기록 기준). 없거나 파싱 실패면 None
+        - details["endpoints"]: 엔드포인트별 Locust 통계 행. 파싱 실패면 None
+
+    Raises:
+        run_load_test와 같다. 추가 데이터 파싱 실패로는 예외를 던지지 않는다.
+    """
+    result, details = _run_locust(target_tps, duration, host, spawn_rate, collect_details=True)
+    return result, details or {"timeseries": None, "endpoints": None}
+
+
+def _run_locust(
+    target_tps: int,
+    duration: int,
+    host: str,
+    spawn_rate: int | None,
+    collect_details: bool,
+) -> tuple[LoadTestResult, dict[str, Any] | None]:
+    """Locust를 한 번 실행하고 (LoadTestResult, details 또는 None)을 반환한다."""
     # --- 입력 검증: 잘못된 값으로 Locust를 띄워 자원을 낭비하지 않도록 사전에 막는다 ---
     if target_tps <= 0:
         raise ValueError("target_tps는 1 이상이어야 합니다.")
@@ -87,6 +139,7 @@ def run_load_test(
     # with 블록을 빠져나가면 디렉터리가 자동 삭제되므로 디스크에 테스트 잔여물이 남지 않는다.
     with tempfile.TemporaryDirectory() as tmp_dir:
         # Locust --csv 옵션은 "prefix"를 받아 prefix_stats.csv / prefix_failures.csv 등을 생성한다.
+        # locustfile.py는 같은 prefix로 prefix_requests.csv(요청별 원시 기록)를 쓴다.
         csv_prefix = str(Path(tmp_dir) / "result")
 
         cmd = [
@@ -138,7 +191,49 @@ def run_load_test(
                 f"Locust 결과 파일을 찾을 수 없습니다 (exit={process.returncode}): {stderr}"
             )
 
-        return _parse_stats_csv(stats_path, duration)
+        result = _parse_stats_csv(stats_path, duration)
+
+        if not collect_details:
+            return result, None
+
+        # 임시 디렉터리가 지워지기 전에 읽는다. 실패해도 LoadTestResult는 그대로 반환한다.
+        details = {
+            "timeseries": _safe_details(
+                "초 단위 시계열",
+                _parse_request_log,
+                Path(f"{csv_prefix}{REQUEST_LOG_SUFFIX}"),
+            ),
+            "endpoints": _safe_details(
+                "엔드포인트별 통계",
+                _parse_endpoint_rows,
+                stats_path,
+            ),
+        }
+
+        return result, details
+
+
+def _safe_details(label: str, parser, path: Path):
+    """추가 데이터 파서를 실행한다. 실패하면 로그만 남기고 None (에이전트 흐름을 멈추지 않는다)."""
+    try:
+        return parser(path)
+    except Exception:
+        logger.warning("Locust %s 파싱 실패 (LoadTestResult는 정상 반환): %s", label, path, exc_info=True)
+        return None
+
+
+def _to_float(value: Any, default: float | None = 0.0) -> float | None:
+    # 테스트 시간이 너무 짧거나 요청 수가 적으면 Locust가 'N/A'를 기록한다.
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _read_stats_rows(stats_path: Path) -> list[dict[str, str]]:
+    with stats_path.open(newline="", encoding="utf-8") as f:
+        # csv.DictReader: 첫 줄을 헤더로 사용해 각 행을 {컬럼명: 값} dict로 변환
+        return list(csv.DictReader(f))
 
 
 def _parse_stats_csv(stats_path: Path, duration: int) -> LoadTestResult:
@@ -148,9 +243,7 @@ def _parse_stats_csv(stats_path: Path, duration: int) -> LoadTestResult:
     합산한 "Aggregated" 행을 포함한다. InfraGuard Agent는 개별 엔드포인트가
     아니라 시스템 전체의 TPS/Latency를 진단하므로 Aggregated 행 하나만 사용한다.
     """
-    with stats_path.open(newline="", encoding="utf-8") as f:
-        # csv.DictReader: 첫 줄을 헤더로 사용해 각 행을 {컬럼명: 값} dict로 변환
-        rows = list(csv.DictReader(f))
+    rows = _read_stats_rows(stats_path)
 
     aggregated = next((row for row in rows if row.get("Name") == "Aggregated"), None)
     if aggregated is None:
@@ -161,18 +254,109 @@ def _parse_stats_csv(stats_path: Path, duration: int) -> LoadTestResult:
     # 0으로 나누기 방지: 요청이 한 건도 없었다면 error_rate는 0으로 처리
     error_rate = (failure_count / total_requests) if total_requests > 0 else 0.0
 
-    def _safe_float(value: str, default: float = 0.0) -> float:
-        # 테스트 시간이 너무 짧거나 요청 수가 적으면 Locust가 'N/A'를 기록한다.
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return default
-
     return LoadTestResult(
-        tps=_safe_float(aggregated["Requests/s"]),
-        latency_p95=_safe_float(aggregated["95%"]),
-        latency_avg=_safe_float(aggregated["Average Response Time"]),
+        tps=_to_float(aggregated["Requests/s"]),
+        latency_p95=_to_float(aggregated["95%"]),
+        latency_avg=_to_float(aggregated["Average Response Time"]),
         error_rate=error_rate,
         duration=duration,
         total_requests=total_requests,
     )
+
+
+def _parse_endpoint_rows(stats_path: Path) -> list[dict[str, Any]]:
+    """`<prefix>_stats.csv`의 엔드포인트 행(Aggregated 제외)을 그대로 옮긴다 (Locust 값, 반올림 없음).
+
+    'N/A' 같은 값은 0으로 채우지 않고 None으로 둔다 (측정값이 아니므로).
+    """
+    endpoints = []
+
+    for row in _read_stats_rows(stats_path):
+        name = row.get("Name")
+
+        if not name or name == "Aggregated":
+            continue
+
+        requests = int(row["Request Count"])
+        failures = int(row["Failure Count"])
+
+        endpoints.append({
+            "name": name,
+            "method": row.get("Type") or None,
+            "requests": requests,
+            "failures": failures,
+            "error_rate": (failures / requests) if requests > 0 else None,
+            "p95_ms": _to_float(row.get("95%"), None),
+            "avg_ms": _to_float(row.get("Average Response Time"), None),
+            "rps": _to_float(row.get("Requests/s"), None),
+        })
+
+    return endpoints
+
+
+def nearest_rank_percentile(sorted_values: list[float], q: float) -> float | None:
+    """nearest-rank 백분위수: 정렬된 값에서 ceil(q × n)번째 값. 값이 없으면 None."""
+    if not sorted_values:
+        return None
+
+    index = max(math.ceil(q * len(sorted_values)) - 1, 0)
+    return sorted_values[index]
+
+
+def _parse_request_log(log_path: Path) -> dict[str, Any] | None:
+    """locustfile이 쓴 요청별 원시 기록으로 초 단위 요청 수·실패 수·P95를 만든다.
+
+    - 구간: 부하 시작(start 행) 기준 [k, k+1)초. 요청은 완료 시각으로 구간을 정한다
+      (Locust의 초당 요청 수 집계와 같은 기준).
+    - P95: 구간 안 원시 응답시간(ms)의 nearest-rank 95%. Locust 요약 P95는 응답시간을
+      반올림해 저장한 뒤 전체 구간으로 계산하므로 값이 조금 다를 수 있다.
+    - 요청이 없는 구간은 requests=0, p95_ms=None으로 둔다 (0ms로 채우지 않는다).
+    - 파일이 없거나 start 행·요청이 없으면 None.
+    """
+    if not log_path.exists():
+        return None
+
+    start: float | None = None
+    requests: list[tuple[float, float, bool]] = []
+
+    with log_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            event = row.get("event")
+
+            if event == "start":
+                start = float(row["time"])
+            elif event == "request":
+                requests.append((
+                    float(row["time"]),
+                    float(row["response_time_ms"]),
+                    row["failed"] == "1",
+                ))
+
+    if start is None or not requests:
+        return None
+
+    buckets: dict[int, list[tuple[float, bool]]] = {}
+
+    for completed_at, response_time, failed in requests:
+        index = max(int((completed_at - start) // TIMESERIES_BUCKET_SEC), 0)
+        buckets.setdefault(index, []).append((response_time, failed))
+
+    points = []
+
+    for index in range(max(buckets) + 1):
+        items = buckets.get(index, [])
+        response_times = sorted(response_time for response_time, _ in items)
+
+        points.append({
+            "t": index * TIMESERIES_BUCKET_SEC,
+            "requests": len(items),
+            "failures": sum(1 for _, failed in items if failed),
+            "p95_ms": nearest_rank_percentile(response_times, TIMESERIES_PERCENTILE),
+        })
+
+    return {
+        "bucket_sec": TIMESERIES_BUCKET_SEC,
+        "source": "locust_request_log",
+        "percentile": "nearest_rank_p95",
+        "points": points,
+    }

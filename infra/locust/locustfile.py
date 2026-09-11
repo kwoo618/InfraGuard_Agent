@@ -11,7 +11,80 @@ DB connection pool을 흉내내는 /heavy로 몰리도록 가중치를 둬서
 웹 UI(localhost:8089)에서 수동 실행 가능하다.
 """
 
-from locust import HttpUser, between, task
+import csv
+import time
+
+from locust import HttpUser, between, events, task
+
+# ---------------------------------------------------------------------
+# 요청별 원시 기록 (결과 패널의 초 단위 TPS·P95 시계열용, docs/03 Phase 4 그래프)
+#
+# Locust stats_history.csv는 초마다 한 행을 쓰지만, 그 행의 P95는 시작부터 그 시점까지의
+# 누적값이고 Requests/s는 최근 약 10초 평균이다. 초 단위 값을 직접 계산하려고
+# 요청이 끝날 때마다 완료 시각·응답시간·실패 여부를 기록한다.
+#
+# 파일 위치는 --csv prefix 옆(<prefix>_requests.csv)이다. run_load_test.py가 이미 --csv를
+# 넘기므로 Locust 명령 인자는 바뀌지 않는다. --csv 없이 실행하면(웹 UI 수동 실행) 기록하지 않는다.
+# 부하 시나리오(가중치, wait_time)에는 영향이 없다.
+# ---------------------------------------------------------------------
+REQUEST_LOG_SUFFIX = "_requests.csv"
+
+_request_log = {"file": None, "writer": None}
+
+
+@events.test_start.add_listener
+def _open_request_log(environment, **kwargs):
+    options = environment.parsed_options
+    prefix = getattr(options, "csv_prefix", None) if options is not None else None
+
+    if not prefix:
+        return
+
+    handle = open(f"{prefix}{REQUEST_LOG_SUFFIX}", "w", newline="", encoding="utf-8")
+    writer = csv.writer(handle)
+    writer.writerow(["event", "time", "name", "response_time_ms", "failed"])
+    # 부하 시작 시각. 초 단위 구간은 이 시각을 0초로 센다
+    writer.writerow(["start", f"{time.time():.6f}", "", "", ""])
+    _request_log.update(file=handle, writer=writer)
+
+
+@events.request.add_listener
+def _log_request(name, response_time, exception=None, **kwargs):
+    writer = _request_log["writer"]
+
+    if writer is None:
+        return
+
+    # request 이벤트는 요청이 끝났을 때 발생한다 → 지금 시각 = 완료 시각
+    writer.writerow([
+        "request",
+        f"{time.time():.6f}",
+        name,
+        f"{response_time:.3f}",
+        "1" if exception is not None else "0",
+    ])
+
+
+def _close_request_log():
+    handle = _request_log["file"]
+
+    if handle is None:
+        return
+
+    _request_log["writer"].writerow(["stop", f"{time.time():.6f}", "", "", ""])
+    handle.close()
+    _request_log.update(file=None, writer=None)
+
+
+@events.test_stop.add_listener
+def _on_test_stop(environment, **kwargs):
+    _close_request_log()
+
+
+@events.quitting.add_listener
+def _on_quitting(environment, **kwargs):
+    # test_stop이 오지 않은 종료에서도 버퍼를 비우고 닫는다
+    _close_request_log()
 
 
 class TargetServerUser(HttpUser):
