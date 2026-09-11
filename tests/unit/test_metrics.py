@@ -5,10 +5,11 @@ test_metrics.py — get_metrics Tool 단위 테스트.
 cpu_pct / mem_pct는 0.0 고정 반환한다.
 connection_count만 Prometheus 쿼리로 가져온다.
 
-테스트 3가지:
+테스트 4가지:
   1. 정상 응답 → connection_count에 숫자가 들어오는지, cpu/mem은 0.0인지
   2. 빈 result → connection_count 0 폴백
   3. 연결 실패 → 에러로 죽지 않고 0 폴백
+  4. cpu/mem 고정값인 동안 RESOURCE_METRICS_COLLECTED가 False인지
 """
 
 import pytest
@@ -105,3 +106,14 @@ async def test_get_system_metrics_connection_error(monkeypatch):
     assert result.cpu_pct == 0.0
     assert result.mem_pct == 0.0
     assert result.connection_count == 0
+
+
+# ── 테스트 4: 미수집 플래그 가드 ──────────────────────────────────────────────
+
+def test_resource_metrics_flag_false_while_values_fixed():
+    """
+    cpu_pct / mem_pct가 0.0 고정값인 동안에는 RESOURCE_METRICS_COLLECTED가 False여야 한다.
+    True면 프롬프트가 0.0을 측정값처럼 LLM에 넘긴다 (docs/02 ISSUE-10).
+    cAdvisor 연동으로 실제 값을 채우는 변경에서 이 테스트도 함께 바꾼다.
+    """
+    assert gm_module.RESOURCE_METRICS_COLLECTED is False

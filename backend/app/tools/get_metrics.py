@@ -6,7 +6,7 @@ get_metrics — Prometheus에 현재 시스템 상태를 물어보고 SystemMetr
 
 동작 순서:
 1. Prometheus HTTP API(/api/v1/query)에 PromQL 쿼리를 날린다.
-2. 요청 처리량(TPS), P95 응답시간, 활성 connection 수를 각각 쿼리한다.
+2. 활성 connection 수(전체 replica의 처리 중 + 대기 중인 요청 수)를 쿼리한다.
 3. 응답 JSON에서 숫자만 뽑아 SystemMetrics(schemas.py)로 포장해 반환한다.
 
 주의:
@@ -14,7 +14,9 @@ get_metrics — Prometheus에 현재 시스템 상태를 물어보고 SystemMetr
   컨테이너별 CPU/메모리 필터링이 불가능하다.
 - 대신 target-server가 /metrics로 직접 노출하는 애플리케이션 레벨 메트릭을 사용한다.
   (prometheus-fastapi-instrumentator 제공)
-- cpu_pct, mem_pct는 0.0으로 고정 반환한다. 향후 리눅스 환경에서 cAdvisor 연동 시 교체.
+- cpu_pct, mem_pct는 0.0으로 고정 반환한다. 측정값이 아니므로 RESOURCE_METRICS_COLLECTED=False로
+  표시하고, agent/prompts.py는 이 값을 "측정 불가"로 바꿔 LLM에 전달한다 (docs/02 ISSUE-10).
+  향후 리눅스 환경에서 cAdvisor 연동 시 교체하고, 같은 변경에서 True로 바꾼다.
 - Prometheus가 아직 데이터를 못 모았거나 쿼리 결과가 비어있으면
   0.0 / 0으로 안전하게 기본값 처리한다 (예외로 죽이지 않는다).
 """
@@ -27,6 +29,11 @@ from app.schemas import SystemMetrics
 
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 QUERY_TIMEOUT_SECONDS = 5.0
+
+# cpu_pct / mem_pct를 실제로 수집하는지 여부.
+# 지금은 0.0 고정값(측정값 아님)이라 False. 프롬프트가 이 값을 보고 "측정 불가"로 표시한다.
+# cAdvisor 등으로 실제 값을 채우는 변경에서 이 값을 True로 바꾼다. (docs/02 ISSUE-10)
+RESOURCE_METRICS_COLLECTED = False
 
 
 async def _query_prometheus(promql: str) -> float:
@@ -65,18 +72,19 @@ async def get_system_metrics() -> SystemMetrics:
     target-server의 애플리케이션 레벨 메트릭을 Prometheus에서 조회해 SystemMetrics로 반환한다.
 
     cpu_pct / mem_pct: 윈도우 Docker Desktop 환경에서 cAdvisor name 라벨 미지원으로 0.0 고정.
+                       측정값이 아니다 (RESOURCE_METRICS_COLLECTED=False).
                        리눅스 환경에서는 container_cpu_usage_seconds_total 쿼리로 교체 가능.
-    connection_count: 현재 처리 중인 요청 수 (병목 판단의 핵심 지표).
+    connection_count: target-server 전체 replica에서 처리 중 + 대기 중인 요청 수의 합 (순간값).
     """
 
-    # 현재 처리 중인 요청 수 — Semaphore 한도(5)에 얼마나 근접했는지 보여주는 핵심 지표
+    # 전체 replica의 in-progress 게이지 합 — 앱에 들어와 처리 중이거나 처리를 기다리는 요청 수
     # "or vector(0)": 데이터 없을 때 0 보장
     connection_query = "sum(http_requests_in_progress) or vector(0)"
 
     connection_count = await _query_prometheus(connection_query)
 
     return SystemMetrics(
-        cpu_pct=0.0,      # TODO: 리눅스 환경에서 cAdvisor 연동 시 교체
-        mem_pct=0.0,      # TODO: 리눅스 환경에서 cAdvisor 연동 시 교체
+        cpu_pct=0.0,      # 측정값 아님 (RESOURCE_METRICS_COLLECTED=False). cAdvisor 연동 시 교체
+        mem_pct=0.0,      # 측정값 아님 (RESOURCE_METRICS_COLLECTED=False). cAdvisor 연동 시 교체
         connection_count=int(connection_count),
     )
