@@ -172,8 +172,9 @@ function buildSummary(report) {
             };
 
         case 'no_scaling_proposed': {
+            // SLO를 충족했을 때만 "불필요"라고 쓴다. 미충족·경계면 "미제안" (결론 배지와 같은 규칙).
             // SLO를 넘었는데 제안하지 않은 경우도 그대로 보여준다 (docs/02 ISSUE-5 관찰 1)
-            const lead = status === 'exceeded' ? '스케일링 미제안' : '스케일링 불필요 판단';
+            const lead = status === 'met' ? '스케일링 불필요 판단' : '스케일링 미제안';
             const tone = status === 'met' ? 'info' : sloTone;
             return { tone, icon: 'ℹ️', text: [lead, p95Part, sloPart, serverPart].join(' · ') };
         }
@@ -278,7 +279,19 @@ function buildConditions(report) {
 // ② AI 판단 카드
 // ---------------------------------------------------------------------
 
-function conclusionBadge(diagnosis, approval) {
+/** 진단 라운드의 측정 레코드로 계산한 P95 SLO 판정 (met / boundary / exceeded / unknown) */
+function diagnosisSloState(diagnosis, report) {
+    const record = findByRound((report && report.measurement_history) || [], diagnosis.round);
+    const slo = report && report.conditions ? report.conditions.p95_slo_ms : null;
+    return sloStatus(record ? record.latency_p95 : null, slo);
+}
+
+/**
+ * 결론 배지. sloState는 그 진단 라운드의 P95 SLO 판정(sloStatus 결과)이다.
+ * 스케일링을 제안하지 않았을 때 SLO를 충족한 경우에만 "불필요"라고 쓴다.
+ * 미충족·경계·판정 불가면 "미제안"이다 (필요 없다고 단정하지 않는다).
+ */
+function conclusionBadge(diagnosis, approval, sloState) {
     if (approval && approval.source === 'forced') {
         return el('span', 'badge badge-danger', 'LLM 판단: 스케일링 불필요 → 디버그로 강제 승인 요청');
     }
@@ -288,7 +301,9 @@ function conclusionBadge(diagnosis, approval) {
         return el('span', 'badge badge-warning', plan ? `스케일링 제안 ${plan}` : '스케일링 제안');
     }
 
-    return el('span', 'badge badge-info', '스케일링 불필요');
+    return sloState === 'met'
+        ? el('span', 'badge badge-info', '스케일링 불필요')
+        : el('span', 'badge badge-muted', '스케일링 미제안');
 }
 
 function severityBadge(severity) {
@@ -318,6 +333,10 @@ function confidenceMeter(confidence, threshold) {
         mark.style.left = `${threshold * 100}%`;
         mark.title = `승인 확인 기준 ${Math.round(threshold * 100)}% (미만이면 확인 후 승인)`;
         track.appendChild(mark);
+
+        const markLabel = el('span', 'confidence-mark-label', `기준 ${Math.round(threshold * 100)}%`);
+        markLabel.style.left = `${threshold * 100}%`;
+        track.appendChild(markLabel);
     }
 
     wrap.appendChild(track);
@@ -395,7 +414,7 @@ function buildDiagnosisCard(diagnosis, approval, record, report) {
     const card = el('div', 'diagnosis-card');
 
     const head = el('div', 'diagnosis-head');
-    head.appendChild(conclusionBadge(diagnosis, approval));
+    head.appendChild(conclusionBadge(diagnosis, approval, diagnosisSloState(diagnosis, report)));
     head.appendChild(severityBadge(diagnosis.severity));
     if (approval && approval.low_confidence) head.appendChild(lowConfidenceBadge(report));
     head.appendChild(confidenceMeter(diagnosis.confidence, report.low_confidence_threshold));
@@ -435,7 +454,7 @@ function buildReDiagnosisRow(diagnosis, approval, report = {}) {
 
     const head = el('div', 'followup-head');
     head.appendChild(el('span', 'followup-title', `라운드 ${diagnosis.round ?? '-'} 재진단`));
-    head.appendChild(conclusionBadge(diagnosis, approval));
+    head.appendChild(conclusionBadge(diagnosis, approval, diagnosisSloState(diagnosis, report)));
     head.appendChild(severityBadge(diagnosis.severity));
     if (approval && approval.low_confidence) head.appendChild(lowConfidenceBadge(report));
     head.appendChild(el('span', 'followup-meta', `신뢰도 ${fmtConfidence(diagnosis.confidence)}`));

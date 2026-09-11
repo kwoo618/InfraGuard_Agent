@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css?v=6">
+    <link rel="stylesheet" href="style.css?v=7">
 </head>
 
 <body>
@@ -90,6 +90,13 @@
                 <input type="number" id="duration-input" value="10" min="1">
             </div>
 
+            <!-- 현재 서버 수(docker compose 실제 값)와 측정 회차 사이 1대 초기화. 에이전트 실행으로 기록하지 않는다 -->
+            <div class="replica-row">
+                <span class="replica-label">현재 서버</span>
+                <span id="replica-count" class="replica-count">확인 중…</span>
+                <button type="button" id="reset-replicas-btn" class="reset-replicas-btn">서버 1대로 초기화</button>
+            </div>
+
             <button id="start-btn">
                 자율 진단 및 부하 테스트 시작
             </button>
@@ -162,8 +169,8 @@
 
     </div>
 
-    <script src="result_panel.js?v=6"></script>
-    <script src="main.js?v=6"></script>
+    <script src="result_panel.js?v=7"></script>
+    <script src="main.js?v=7"></script>
 
 </body>
 

@@ -935,3 +935,54 @@ button:active{
     cursor: not-allowed;
     transform: none;
 }
+
+/* 신뢰도 막대 기준선 라벨 */
+.confidence {
+    padding-bottom: 12px;
+}
+
+.confidence-mark-label {
+    position: absolute;
+    top: 13px;
+    transform: translateX(-50%);
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+/* ================= 현재 서버 수 · 1대 초기화 ================= */
+.replica-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    font-size: 14px;
+}
+
+.replica-label {
+    color: var(--text-muted);
+}
+
+.replica-count {
+    font-weight: 700;
+}
+
+.reset-replicas-btn {
+    margin-left: auto;
+    background: #21262d;
+    border: 1px solid var(--border-color);
+    padding: 7px 12px;
+    font-size: 13px;
+}
+
+.reset-replicas-btn:hover {
+    background: #30363d;
+}
+
+.reset-replicas-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    transform: none;
+}

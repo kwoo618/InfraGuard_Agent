@@ -7,6 +7,8 @@ const rejectBtn = document.getElementById('reject-btn');
 const lowConfidenceBox = document.getElementById('low-confidence-box');
 const lowConfidenceText = document.getElementById('low-confidence-text');
 const lowConfidenceAck = document.getElementById('low-confidence-ack');
+const replicaCount = document.getElementById('replica-count');
+const resetReplicasBtn = document.getElementById('reset-replicas-btn');
 
 
 
@@ -63,6 +65,80 @@ function setupLowConfidenceGate(data) {
 }
 
 lowConfidenceAck.addEventListener('change', syncApproveButton);
+
+// 현재 서버 수 표시 · 1대 초기화 (측정 회차 사이 사람의 수동 조작, 결과 파일에 기록하지 않음).
+// 에이전트 실행 중(승인 대기 포함)이거나 초기화 중이면 버튼을 막는다. 서버도 409로 거부한다.
+let agentRunning = false;
+let replicaResetting = false;
+let serverBusy = false;   // /agent/replicas의 busy (다른 탭에서 실행 중인 경우 포함)
+
+function syncResetButton() {
+    resetReplicasBtn.disabled = agentRunning || replicaResetting || serverBusy;
+}
+
+function setAgentRunning(running) {
+    const wasRunning = agentRunning;
+    agentRunning = running;
+    syncResetButton();
+    // 실행이 끝날 때마다 실제 서버 수를 다시 읽는다
+    if (wasRunning && !running) {
+        refreshReplicas();
+    }
+}
+
+async function refreshReplicas() {
+    try {
+        const response = await fetch('/api/v1/agent/replicas');
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        replicaCount.textContent = typeof data.replicas === 'number' ? `${data.replicas}대` : '조회 실패';
+        serverBusy = data.busy === true;
+    } catch (error) {
+        console.warn('[replicas] 조회 실패:', error);
+        replicaCount.textContent = '조회 실패';
+        serverBusy = false;
+    }
+    syncResetButton();
+}
+
+resetReplicasBtn.addEventListener('click', async () => {
+    if (resetReplicasBtn.disabled) return;
+
+    const confirmed = window.confirm(
+        `서버(target-server)를 1대로 초기화합니다. (현재 ${replicaCount.textContent})\n`
+        + '측정 회차 사이에만 사용하세요. 결과 파일에는 기록되지 않습니다. 계속할까요?'
+    );
+    if (!confirmed) return;
+
+    replicaResetting = true;
+    startBtn.disabled = true;
+    syncResetButton();
+    replicaCount.textContent = '초기화 중…';
+    appendLog('서버 1대로 초기화 요청', 'system');
+
+    try {
+        const response = await fetch('/api/v1/agent/replicas/reset', { method: 'POST' });
+        const result = await response.json();
+
+        if (!response.ok) {
+            appendLog(result.detail || '서버 수 초기화가 거부되었습니다.', 'error');
+        } else if (result.success) {
+            appendLog(`서버 수 초기화 완료: ${result.before_replicas}대 → ${result.after_replicas}대`, 'success');
+        } else {
+            appendLog(`서버 수 초기화 실패: ${result.error_message || '원인 미상'}`, 'error');
+        }
+    } catch (error) {
+        appendLog('서버 수 초기화 요청 실패', 'error');
+    } finally {
+        replicaResetting = false;
+        startBtn.disabled = agentRunning;
+        await refreshReplicas();
+    }
+});
+
+refreshReplicas();
 
 // 부하 테스트 프로그레스 바 타이머
 let loadTestTimer = null;
@@ -195,6 +271,10 @@ function updateStatus(text, cls) {
 
     statusLabel.className = `status ${cls}`;
     statusLabel.innerHTML = text;
+
+    // 진행 중 상태(RUNNING·WAITING·SCALING)면 에이전트 실행 중으로 보고 서버 초기화 버튼을 막는다.
+    // 끝난 상태(COMPLETED·ERROR)로 바뀌면 실제 서버 수를 다시 읽는다.
+    setAgentRunning(['running', 'waiting', 'scaling'].includes(cls));
 
 }
 

@@ -452,6 +452,17 @@ class RunRecorder:
         except ValueError:
             return str(self.result_file)
 
+    @property
+    def finalized(self) -> bool:
+        """
+        실행이 끝났는지 (finalize 호출 여부).
+
+        실행이 끝나는 모든 경로(스트림 종료 포함)에서 finalize되므로, 아직 False면 실행 중(승인 대기 포함)이다.
+        서버 수 초기화 엔드포인트가 실행 중 여부를 판단할 때 쓴다.
+        """
+
+        return self._finalized
+
     def _latest_round(self) -> int | None:
         return self._history[-1]["round"] if self._history else None
 

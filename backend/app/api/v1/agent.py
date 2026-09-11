@@ -11,7 +11,7 @@ from app.agent.engine import resume_after_approval, run_diagnosis
 from app.agent.nodes import call_solar_api
 from app.agent.state import AgentRuntimeState, create_initial_state
 from app.api.v1.run_history import RunRecorder
-from app.tools.scale_service import get_current_replicas
+from app.tools.scale_service import get_current_replicas, scale_service
 
 # 이 파일 하나로 라우팅까지 끝내기 위해 라우터 객체 선언
 router = APIRouter()
@@ -212,6 +212,79 @@ async def approve_task(req: ApprovalRequest):
         return {"status": "error", "message": "이미 처리된 작업입니다. (중복 클릭)"}
 
     return {"status": "error", "message": "해당 작업 ID를 찾을 수 없습니다."}
+
+
+# =================================================================
+# 🔄 현재 서버 수 조회 · 1대 초기화 (측정 회차 사이 사람의 수동 조작)
+# 에이전트 실행이 아니므로 results/에 기록하지 않고 서버 로그만 남긴다.
+# =================================================================
+# 초기화가 진행 중인지. 중복 요청은 409로 거부한다
+_replica_reset_in_progress = False
+
+
+def _agent_busy() -> bool:
+    """
+    에이전트 실행이 진행 중인지 (승인 대기 포함).
+
+    실행마다 RunRecorder가 생기고 실행이 끝나는 모든 경로(스트림 종료 포함)에서 finalize되므로,
+    finalize되지 않은 기록기가 있으면 실행 중이다.
+    """
+
+    return any(not recorder.finalized for recorder in run_records.values())
+
+
+@router.get("/agent/replicas")
+async def get_replicas():
+    """현재 target-server replica 수(docker compose ps 실제 값). 조회 실패면 null."""
+
+    replicas = await _read_replicas()
+
+    return {
+        "replicas": replicas if replicas >= 1 else None,
+        "busy": _agent_busy() or _replica_reset_in_progress,
+    }
+
+
+@router.post("/agent/replicas/reset")
+async def reset_replicas():
+    """
+    target-server를 1대로 되돌린다 (측정 회차 사이 초기화).
+
+    에이전트 실행 중·승인 대기 중이거나 다른 초기화가 진행 중이면 409로 거부한다.
+    UI 버튼 비활성화만이 아니라 API를 직접 호출해도 실행 중에는 서버 수가 바뀌지 않게 하기 위해서다.
+    """
+    global _replica_reset_in_progress
+
+    if _agent_busy():
+        raise HTTPException(
+            status_code=409,
+            detail="에이전트 실행 중(승인 대기 포함)에는 서버 수를 초기화할 수 없습니다.",
+        )
+
+    if _replica_reset_in_progress:
+        raise HTTPException(status_code=409, detail="서버 수 초기화가 이미 진행 중입니다.")
+
+    _replica_reset_in_progress = True
+    print("[replicas/reset] 수동 초기화 요청: target-server → 1대")
+
+    try:
+        # scale_service는 async지만 안에서 docker compose(--wait 포함, 수 초)를 동기로 실행한다.
+        # 그동안 이벤트 루프가 멈추지 않게 별도 스레드의 이벤트 루프에서 실행한다.
+        result = await asyncio.to_thread(asyncio.run, scale_service(1))
+    finally:
+        _replica_reset_in_progress = False
+
+    print(
+        f"[replicas/reset] before={result.before_replicas} after={result.after_replicas} "
+        f"success={result.success} error={result.error_message}"
+    )
+
+    return {
+        "before_replicas": result.before_replicas,
+        "after_replicas": result.after_replicas,
+        "success": result.success,
+        "error_message": result.error_message,
+    }
 
 
 # =================================================================
