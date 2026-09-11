@@ -259,6 +259,14 @@ async function fetchReport(taskId) {
             });
         }
 
+        // 결과 패널 (Phase 4, #75, result_panel.js). 위의 로그 출력은 그대로 두고 패널을 추가로 그린다.
+        try {
+            renderResultPanel(report);
+        } catch (panelError) {
+            console.error('[result-panel] 렌더링 실패:', panelError);
+            appendLog("결과 패널을 표시하지 못했습니다. (로그의 결과는 위와 같습니다)", "error");
+        }
+
     } catch (error) {
         appendLog("리포트 조회 중 오류가 발생했습니다.", "error");
     }
@@ -272,6 +280,7 @@ startBtn.addEventListener('click', () => {
 
     resetProgress();
     resetLoadTestProgress();
+    resetResultPanel();
 
     appendLog('자율 진단 시스템 가동 요청 중...', 'system');
 

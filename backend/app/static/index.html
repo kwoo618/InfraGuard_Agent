@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css?v=4">
+    <link rel="stylesheet" href="style.css?v=5">
 </head>
 
 <body>
@@ -106,6 +106,15 @@
             </div>
         </div>
 
+        <!-- 실행 결과 패널 (Phase 4, #75). 리포트 단계에서 result_panel.js가 /report 응답으로 채운다 -->
+        <section id="result-panel" class="result-panel hidden">
+            <div class="result-header">
+                <h3 class="result-title">📊 실행 결과</h3>
+                <a class="grafana-link" href="http://localhost:3000" target="_blank" rel="noopener">Grafana 대시보드 열기 ↗</a>
+            </div>
+            <div id="result-body"></div>
+        </section>
+
     
         <div class="log-container">
 
@@ -144,7 +153,8 @@
 
     </div>
 
-    <script src="main.js?v=4"></script>
+    <script src="result_panel.js?v=5"></script>
+    <script src="main.js?v=5"></script>
 
 </body>
 

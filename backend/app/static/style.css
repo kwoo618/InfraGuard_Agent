@@ -522,3 +522,372 @@ button:active{
     border-radius: 999px;
     padding: 3px 10px;
 }
+
+/* ================= 실행 결과 패널 (Phase 4, #75) ================= */
+/* SLO 판정 색: 충족 초록 / 경계(= SLO) 노랑 / 미충족 빨강. 배너 톤은 미충족을 주황(warning)으로 쓴다. */
+.result-panel {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 25px;
+}
+
+.result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.result-title {
+    font-size: 22px;
+}
+
+.grafana-link {
+    color: var(--text-main);
+    background: #21262d;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.grafana-link:hover {
+    background: #30363d;
+}
+
+.result-alert {
+    background: rgba(218, 54, 51, .15);
+    border: 1px solid var(--accent-red);
+    border-radius: 6px;
+    color: #ff7b72;
+    font-weight: 700;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+
+.result-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: #161b22;
+    border: 1px solid var(--border-color);
+    border-left: 5px solid var(--text-muted);
+    border-radius: 8px;
+    padding: 14px 16px;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.5;
+    margin-bottom: 12px;
+}
+
+.result-banner.tone-success  { border-left-color: #56d364; background: rgba(86, 211, 100, .10); }
+.result-banner.tone-info     { border-left-color: #58a6ff; background: rgba(88, 166, 255, .10); }
+.result-banner.tone-boundary { border-left-color: #e3b341; background: rgba(227, 179, 65, .12); }
+.result-banner.tone-warning  { border-left-color: #ffa500; background: rgba(255, 165, 0, .12); }
+.result-banner.tone-danger   { border-left-color: #ff7b72; background: rgba(255, 123, 114, .12); }
+
+.result-conditions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+.result-conditions-title {
+    color: var(--text-muted);
+    font-weight: 700;
+}
+
+.result-conditions-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.condition-item {
+    background: #161b22;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 3px 10px;
+}
+
+.result-conditions-meta {
+    flex-basis: 100%;
+    color: #6e7681;
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.result-section {
+    border-top: 1px solid var(--border-color);
+    margin-top: 14px;
+    padding-top: 14px;
+}
+
+.result-section-title {
+    font-size: 16px;
+    margin-bottom: 10px;
+}
+
+.result-empty {
+    color: var(--text-muted);
+    border: 1px dashed var(--border-color);
+    border-radius: 6px;
+    padding: 14px;
+    text-align: center;
+}
+
+.result-note {
+    color: #6e7681;
+    font-size: 12px;
+    margin-top: 8px;
+}
+
+/* AI 판단 카드 */
+.diagnosis-card {
+    background: #161b22;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.diagnosis-head,
+.followup-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.badge {
+    display: inline-block;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.badge-warning { color: #ffa500; border-color: #ffa500; background: rgba(255, 165, 0, .10); }
+.badge-danger  { color: #ff7b72; border-color: #ff7b72; background: rgba(255, 123, 114, .10); }
+.badge-success { color: #56d364; border-color: #56d364; background: rgba(86, 211, 100, .10); }
+.badge-info    { color: #58a6ff; border-color: #58a6ff; background: rgba(88, 166, 255, .10); }
+.badge-muted   { color: var(--text-muted); border-color: var(--border-color); }
+
+.confidence {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    font-size: 13px;
+}
+
+.confidence-label {
+    color: var(--text-muted);
+}
+
+.confidence-track {
+    position: relative;
+    width: 140px;
+    height: 10px;
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+}
+
+.confidence-fill {
+    width: 0;
+    height: 100%;
+    background: linear-gradient(90deg, #58a6ff, #1f6feb);
+    border-radius: 5px;
+}
+
+.confidence-value {
+    min-width: 48px;
+    font-weight: 700;
+}
+
+.chip-group-title {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.chip-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.chip {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 13px;
+}
+
+.chip-muted {
+    color: var(--text-muted);
+    border-style: dashed;
+}
+
+.chip-slo-met      { color: #56d364; border-color: #2ea44f; }
+.chip-slo-boundary { color: #e3b341; border-color: #e3b341; }
+.chip-slo-exceeded { color: #ff7b72; border-color: #da3633; }
+.chip-slo-unknown  { color: var(--text-muted); }
+
+.decision-line {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.decision-approved { color: #56d364; }
+.decision-rejected { color: #ff7b72; }
+.decision-none     { color: var(--text-muted); }
+
+.raw-details {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+.raw-details summary {
+    color: var(--accent-blue);
+    cursor: pointer;
+}
+
+.raw-label {
+    color: var(--text-muted);
+    font-weight: 700;
+    margin-top: 8px;
+}
+
+.raw-text {
+    color: #c9d1d9;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    margin-top: 2px;
+}
+
+.followup-row {
+    border-left: 3px solid var(--border-color);
+    padding: 8px 0 8px 12px;
+    margin-top: 10px;
+}
+
+.followup-title {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.followup-meta {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* 전/후 비교 카드 */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+}
+
+.metric-card {
+    background: #161b22;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+
+.metric-title {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.metric-values {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.metric-before,
+.metric-arrow {
+    color: var(--text-muted);
+}
+
+.metric-arrow {
+    font-size: 16px;
+}
+
+.metric-delta {
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 6px;
+}
+
+.delta-good    { color: #56d364; }
+.delta-bad     { color: #ff7b72; }
+.delta-neutral { color: var(--text-muted); }
+
+.metric-slo {
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* 라운드별 막대 차트 (inline SVG) */
+.chart-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.chart {
+    background: #161b22;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+
+.chart-title {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+.chart-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+.chart-axis { stroke: #30363d; stroke-width: 1; }
+
+.chart-bar.bar-good     { fill: #2ea44f; }
+.chart-bar.bar-boundary { fill: #e3b341; }
+.chart-bar.bar-bad      { fill: #da3633; }
+.chart-bar.bar-tps      { fill: #1f6feb; }
+.chart-bar.bar-neutral  { fill: #6e7681; }
+
+.chart-value     { fill: #ffffff; font-size: 12px; font-weight: 700; }
+.chart-label     { fill: #c9d1d9; font-size: 12px; font-weight: 600; }
+.chart-sublabel,
+.chart-nodata    { fill: #8b949e; font-size: 11px; }
+.chart-ref       { stroke: #e6edf3; stroke-width: 1.5; stroke-dasharray: 6 4; }
+.chart-ref-label { fill: #e6edf3; font-size: 11px; font-weight: 700; }
