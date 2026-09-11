@@ -5,84 +5,110 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
-    <link rel="stylesheet" href="style.css?v=9">
+    <!-- 보기 전환 (#93): 기본 보기(simple) = refresh/c.css, 상세 보기(detail) = refresh/a.css. view_switch.js가 고른다 -->
+    <link rel="stylesheet" href="toolbar.css?v=13">
+    <link rel="stylesheet" href="refresh/common.css?v=13">
+    <link rel="stylesheet" href="refresh/c.css?v=13" data-view-sheet="simple">
+    <link rel="stylesheet" href="refresh/a.css?v=13" data-view-sheet="detail">
+    <script src="view_switch.js?v=13"></script>
 </head>
 
 <body>
 
     <div class="container">
 
-        <h1>🛡️ InfraGuard Agent 제어 대시보드</h1>
-        <p>인프라 자율 진단 및 스케일링 에이전트 시스템</p>
-
-        <div class="status-panel">
-            <span>Agent Status</span>
-            <div class="status-right">
-                <span id="debug-badge" class="debug-badge hidden" title="URL에 ?debug=1이 있어 force_scaling=true를 요청합니다">DEBUG · force_scaling 요청</span>
-                <span id="agent-status" class="status ready">
-                    🟢 READY
-                </span>
+        <!-- 상단 도구 막대 (#93): 기본 보기 / 상세 보기 전환, 저장된 실행 기록 불러오기 -->
+        <div id="ig-toolbar" class="ig-toolbar">
+            <div class="ig-toolbar-row">
+                <div class="ig-toolbar-group ig-view-toggle" role="group" aria-label="보기 전환">
+                    <button type="button" data-view-option="simple" aria-pressed="false">기본 보기</button>
+                    <button type="button" data-view-option="detail" aria-pressed="false">상세 보기</button>
+                </div>
+                <div class="ig-toolbar-group ig-saved-group">
+                    <label class="ig-toolbar-label" for="saved-select">저장된 실행 기록</label>
+                    <select id="saved-select" disabled>
+                        <option value="">목록을 불러오는 중…</option>
+                    </select>
+                    <button type="button" id="saved-load-btn" disabled>불러오기</button>
+                    <span id="saved-error" class="ig-saved-error hidden" role="alert"></span>
+                </div>
+            </div>
+            <div id="saved-banner" class="ig-saved-banner hidden" role="status">
+                <span id="saved-banner-text" class="ig-saved-banner-text"></span>
+                <button type="button" id="saved-exit-btn">실시간 보기로 돌아가기</button>
             </div>
         </div>
 
-        <div class="progress-timeline">
+        <h1>InfraGuard Agent 제어 대시보드</h1>
+        <p>인프라 자율 진단 및 스케일링 에이전트 시스템</p>
+
+        <div class="status-panel">
+            <span>에이전트 상태</span>
+            <div class="status-right">
+                <span id="debug-badge" class="debug-badge hidden" title="URL에 ?debug=1이 있어 force_scaling=true를 요청합니다">DEBUG · force_scaling 요청</span>
+                <span id="agent-status" class="status ready">대기</span>
+            </div>
+        </div>
+
+        <!-- 진행 단계. 원 안의 번호는 CSS가 채운다. 실행이 끝나면 건너뜀·거절·실패도 표시한다 (main.js finishTimeline) -->
+        <div class="progress-timeline" aria-label="진행 단계">
 
             <div id="step-load" class="timeline-step">
-                <div class="timeline-circle">⚡</div>
-                <span>Load Test</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">부하 테스트</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-metric" class="timeline-step">
-                <div class="timeline-circle">📊</div>
-                <span>Metrics</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">메트릭</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-ai" class="timeline-step">
-                <div class="timeline-circle">🧠</div>
-                <span>AI Analysis</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">AI 분석</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-plan" class="timeline-step">
-                <div class="timeline-circle">📋</div>
-                <span>Plan</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">계획</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-approval" class="timeline-step">
-                <div class="timeline-circle">⚠️</div>
-                <span>Approval</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">승인</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-scale" class="timeline-step">
-                <div class="timeline-circle">🚀</div>
-                <span>Scale-Out</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">스케일링</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-report" class="timeline-step">
-                <div class="timeline-circle">📄</div>
-                <span>Report</span>
+                <div class="timeline-circle"></div>
+                <span class="timeline-label">리포트</span>
             </div>
 
         </div>
 
 
-
         <div class="control-panel">
 
             <div class="input-group">
-                <label for="target-tps-input">동시 가상 사용자 수 <span class="input-hint">(Locust 동시 접속 사용자 · 처리량 목표 아님)</span></label>
-                <input type="number" id="target-tps-input" value="30" min="1">
+                <label for="target-tps-input">동시 가상 사용자 수</label>
+                <input type="number" id="target-tps-input" value="30" min="1" aria-describedby="target-tps-hint">
+                <p id="target-tps-hint" class="input-hint">Locust 동시 접속 사용자 · 처리량 목표 아님</p>
             </div>
 
             <div class="input-group">
@@ -107,7 +133,7 @@
 
         <div id="load-test-progress-container" class="progress-container hidden">
             <div class="progress-bar-header">
-                <span id="progress-label">⚡ 부하 테스트 진행 중...</span>
+                <span id="progress-label">부하 테스트 진행 중...</span>
                 <span id="progress-text">0.0s / 0s (0%)</span>
             </div>
             <div class="progress-bar-track">
@@ -115,36 +141,35 @@
             </div>
         </div>
 
-        <!-- 실행 결과 패널 (Phase 4, #75). 리포트 단계에서 result_panel.js가 /report 응답으로 채운다 -->
-        <section id="result-panel" class="result-panel hidden">
-            <div class="result-header">
-                <h3 class="result-title">📊 실행 결과</h3>
-                <a class="grafana-link" href="http://localhost:3000" target="_blank" rel="noopener">Grafana 대시보드 열기 ↗</a>
-            </div>
+        <!-- 실행 결과 패널 (Phase 4 #75, #93). /report 응답(또는 저장된 실행 기록)을 현재 보기의 렌더러가 채운다 -->
+        <section id="result-panel" class="result-panel hidden" aria-label="실행 결과">
             <div id="result-body"></div>
         </section>
 
-    
-        <div class="log-container">
 
-            <h3 class="terminal-title">
-                🤖 에이전트 실시간 분석 로그 (SSE)
-            </h3>
+        <div id="log-container" class="log-container">
+
+            <div class="log-head">
+                <h3 class="terminal-title">실행 로그</h3>
+                <!-- 기본 보기는 결과가 나오면 로그를 접는다 (로그와 결과 패널 중복 정리, #93) -->
+                <button type="button" id="log-toggle-btn" class="log-toggle" aria-controls="log-window" aria-expanded="true">로그 접기</button>
+            </div>
 
             <div id="log-window" class="log-window">
-                <div class="log-entry system">
-                    시스템 대기 중...
-                </div>
+                <div class="log-entry system">시스템 대기 중...</div>
             </div>
 
         </div>
 
-        
+
         <div id="approval-modal" class="hidden">
 
-            <h3>⚠️ 인프라 조치 승인 요청</h3>
+            <h3>인프라 조치 승인 요청</h3>
 
             <p id="modal-message"></p>
+
+            <!-- 용어 풀이 (#93): 승인 요청 문구에 P95·SLO가 먼저 나올 수 있다 -->
+            <p class="ig-glossary"><b>P95</b>: 느린 순서로 상위 5%를 뺀 응답 시간 · <b>SLO</b>: 요청의 95%가 정해진 시간 안에 응답해야 한다는 목표</p>
 
             <!-- 저신뢰 확인 게이트 (#83): 신뢰도 기준 미만 스케일링 제안일 때만 보인다 -->
             <div id="low-confidence-box" class="low-confidence-box hidden">
@@ -157,13 +182,9 @@
 
             <div class="modal-buttons">
 
-                <button id="approve-btn">
-                    승인 (Scale-out)
-                </button>
+                <button id="approve-btn">승인하고 스케일링</button>
 
-                <button id="reject-btn">
-                    거절
-                </button>
+                <button id="reject-btn">거절</button>
 
             </div>
 
@@ -171,9 +192,12 @@
 
     </div>
 
-    <script src="result_panel.js?v=9"></script>
-    <script src="result_charts.js?v=9"></script>
-    <script src="main.js?v=9"></script>
+    <script src="result_panel.js?v=13"></script>
+    <script src="refresh/common.js?v=13"></script>
+    <script src="refresh/c.js?v=13"></script>
+    <script src="refresh/a.js?v=13"></script>
+    <script src="saved_results.js?v=13"></script>
+    <script src="main.js?v=13"></script>
 
 </body>
 
