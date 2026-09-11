@@ -49,3 +49,8 @@ infra/grafana/data/
 *.tmp
 *.bak
 reports/
+
+# ===== 에이전트 실행 결과 (Phase 3, #75) =====
+# 실행마다 results/{YYYYMMDD_HHMMSS}_{task_id}.json이 쌓인다.
+# 발표용 증빙은 골라서 docs/evidence/로 옮겨 커밋한다.
+results/

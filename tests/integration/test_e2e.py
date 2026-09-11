@@ -11,6 +11,7 @@ try:
 except ImportError:
     pass
 
+from app.api.v1 import run_history
 from app.main import app
 
 # 💡 이제 뒤에 번호(-2, -3)를 떼고 공통된 핵심 이름만 기본값으로 지정합니다.
@@ -18,11 +19,13 @@ TARGET_CONTAINER_NAME = os.getenv("TARGET_CONTAINER_NAME", "infraguard_agent-tar
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 
 @pytest.mark.asyncio
-async def test_agent_real_e2e_full_verification():
+async def test_agent_real_e2e_full_verification(tmp_path, monkeypatch):
     """
     실제 인프라(Docker, API Key, Prometheus) 구축 여부를 실시간으로 진단하고,
     미구축 시 터미널에 즉시 상세 사유를 출력한 뒤 테스트를 건너뜁니다.
     """
+    # 실제 실행이지만 테스트 조건(duration 3초)이라 results/에 섞지 않는다 (docs/03 Phase 3).
+    monkeypatch.setattr(run_history, "RESULTS_DIR", tmp_path / "results")
     global TARGET_CONTAINER_NAME  # 내부에서 찾은 실제 이름으로 동적 업데이트하기 위함
     
     # ------------------------------------------------------------------
