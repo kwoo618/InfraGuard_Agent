@@ -1,7 +1,21 @@
 import json
+import os
 from dataclasses import asdict
 
 from app.schemas import LoadTestResult, SystemMetrics
+from app.tools.get_metrics import RESOURCE_METRICS_COLLECTED
+
+# 수집되지 않는 메트릭(cpu_pct, mem_pct) 자리에 숫자 대신 넣는 문구.
+# get_metrics.py가 0.0을 고정 반환하는 환경에서 0.0이 측정값처럼
+# LLM에 전달되지 않도록 한다. (docs/02_알려진이슈.md ISSUE-10)
+UNMEASURED_TEXT = "측정 불가 — 판단 근거로 사용하지 말 것"
+
+# P95 응답 시간 SLO 기본값(ms). 측정 전에 정한 값이며 결과를 보고 조정하지 않는다.
+# 근거 (docs/02_알려진이슈.md ISSUE-10):
+# - generate_plan.py가 P95 >= 1000ms를 "높음"으로 분류하는 기존 기준과 같다.
+# - target-server /heavy 처리시간 설계값(0.2~0.6초)으로 추정한 대기 없는 P95(약 530ms)는
+#   이 값을 충족하고, 대기열이 쌓이면 위반한다. (설계값 계산이며 실측이 아니다)
+DEFAULT_P95_SLO_MS = 1000
 
 # 이 프롬프트는 모든 병목 분석 요청에 공통으로 사용한다.
 # 사용자가 입력한 데이터와 관계없이 LLM이 항상 지켜야 하는
@@ -15,32 +29,139 @@ InfraGuard Agent입니다.
 
 분석할 때 다음 원칙을 반드시 지켜야 합니다.
 
-1. TPS, 응답 지연 시간, 오류율, CPU 사용률, 메모리 사용률 등의
-   수치 데이터를 근거로 판단합니다.
+1. TPS, 응답 지연 시간, 오류율, 활성 연결 수, CPU 사용률,
+   메모리 사용률 등 제공된 측정값을 근거로 판단합니다.
 
 2. CPU 사용률 하나만으로 병목을 판단하지 않습니다.
    부하 테스트 결과와 시스템 메트릭을 종합적으로 분석합니다.
 
-3. 병목 원인을 확실하게 판단하기 어려운 경우에는
+3. "측정 불가"로 표시된 항목은 판단 근거로 사용하지 않으며,
+   그 항목을 근거로 병목이 없다고 결론짓지 않습니다.
+
+4. 병목 원인을 확실하게 판단하기 어려운 경우에는
    추측하지 말고 불확실하다고 표시합니다.
 
-4. 무조건 스케일링을 제안하지 않습니다.
+5. 무조건 스케일링을 제안하지 않습니다.
    실제로 성능 개선이 필요하다고 판단될 때만 제안합니다.
 
-5. 스케일링이 필요한 경우에는 대상 서비스, 현재 컨테이너 수,
+6. 스케일링이 필요한 경우에는 대상 서비스, 현재 컨테이너 수,
    목표 컨테이너 수와 판단 근거를 제공합니다.
 
-6. 사용자의 승인 없이 직접 인프라를 변경하지 않습니다.
+7. 사용자의 승인 없이 직접 인프라를 변경하지 않습니다.
 
-7. severity는 반드시 low, medium, high 중 하나를 사용합니다.
+8. severity는 반드시 low, medium, high 중 하나를 사용합니다.
 
-8. confidence는 반드시 0.0부터 1.0 사이의 숫자로 작성합니다.
-
-9. 응답은 반드시 요청된 JSON 형식으로만 반환합니다.
+9. confidence는 반드시 0.0부터 1.0 사이의 숫자로 작성합니다.
 
 10. 응답은 반드시 요청된 JSON 형식으로만 반환합니다.
+
+11. 응답은 반드시 요청된 JSON 형식으로만 반환합니다.
    JSON 외의 설명이나 마크다운 문법은 포함하지 않습니다.
 """.strip()
+
+
+def get_p95_slo_ms() -> int:
+    """
+    P95_SLO_MS 환경변수를 읽어 P95 응답 시간 SLO(ms)를 반환한다.
+
+    nodes.py가 이 모듈을 import한 뒤에 load_dotenv()를 호출하므로
+    모듈 로드 시점이 아니라 호출 시점에 읽는다.
+
+    Raises
+    ------
+    ValueError
+        값이 정수가 아니거나 1 미만인 경우.
+        잘못된 설정을 기본값으로 조용히 대체하지 않는다.
+    """
+
+    raw_value = os.getenv("P95_SLO_MS", "").strip()
+
+    if not raw_value:
+        return DEFAULT_P95_SLO_MS
+
+    try:
+        slo_ms = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"P95_SLO_MS는 정수(ms)여야 합니다: {raw_value!r}"
+        ) from exc
+
+    if slo_ms < 1:
+        raise ValueError(
+            f"P95_SLO_MS는 1 이상이어야 합니다: {slo_ms}"
+        )
+
+    return slo_ms
+
+
+def _resolve_p95_slo_ms(p95_slo_ms: int | None) -> int:
+    """인자로 받은 SLO가 없으면 환경변수(기본값 포함)에서 읽는다."""
+
+    if p95_slo_ms is None:
+        return get_p95_slo_ms()
+
+    if p95_slo_ms < 1:
+        raise ValueError(
+            f"p95_slo_ms는 1 이상이어야 합니다: {p95_slo_ms}"
+        )
+
+    return p95_slo_ms
+
+
+def _serialize_system_metrics(
+    system_metrics: SystemMetrics,
+    resource_metrics_collected: bool,
+) -> str:
+    """
+    SystemMetrics를 프롬프트용 JSON 문자열로 만든다.
+
+    CPU/메모리가 수집되지 않는 환경이면 0.0 대신 UNMEASURED_TEXT를 넣는다.
+    """
+
+    metrics = asdict(system_metrics)
+
+    if not resource_metrics_collected:
+        metrics["cpu_pct"] = UNMEASURED_TEXT
+        metrics["mem_pct"] = UNMEASURED_TEXT
+
+    return json.dumps(
+        metrics,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _build_metrics_description(
+    resource_metrics_collected: bool,
+) -> str:
+    """시스템 메트릭 각 필드가 무엇을 뜻하는지 설명하는 문단을 만든다."""
+
+    lines = [
+        "- connection_count:",
+        "  target-server 전체 replica에 들어와 처리 중이거나",
+        "  처리를 기다리는 동시 요청 수의 합입니다.",
+        "  부하 테스트가 끝난 직후 조회한 순간값(수집 주기 5초)이며,",
+        "  부하 테스트 구간 전체의 평균이 아닙니다.",
+    ]
+
+    if resource_metrics_collected:
+        lines.extend(
+            [
+                "- cpu_pct, mem_pct:",
+                "  CPU 사용률과 메모리 사용률(%)입니다.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- cpu_pct, mem_pct:",
+                "  이 환경에서는 수집되지 않습니다.",
+                f'  값 자리에 "{UNMEASURED_TEXT}" 문구가 들어 있으며,',
+                "  CPU·메모리의 여유나 과부하를 판단 근거로 사용하지 마세요.",
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 def build_bottleneck_analysis_prompt(
@@ -49,6 +170,9 @@ def build_bottleneck_analysis_prompt(
     system_metrics: SystemMetrics,
     service_name: str,
     current_replicas: int,
+    *,
+    resource_metrics_collected: bool = RESOURCE_METRICS_COLLECTED,
+    p95_slo_ms: int | None = None,
 ) -> str:
     """
     Locust 부하 테스트 결과와 Prometheus 시스템 메트릭을
@@ -70,6 +194,15 @@ def build_bottleneck_analysis_prompt(
 
     current_replicas:
         현재 실행 중인 서비스 컨테이너 수.
+
+    resource_metrics_collected:
+        cpu_pct / mem_pct를 실제로 수집하는지 여부.
+        False면 두 값을 "측정 불가"로 표시한다.
+        기본값은 get_metrics.RESOURCE_METRICS_COLLECTED.
+
+    p95_slo_ms:
+        P95 응답 시간 SLO(ms). None이면 P95_SLO_MS 환경변수
+        (없으면 DEFAULT_P95_SLO_MS)를 사용한다.
     Returns
     -------
     str
@@ -78,11 +211,13 @@ def build_bottleneck_analysis_prompt(
     Raises
     ------
     ValueError
-        target_tps가 1 이하일 경우.
+        target_tps가 1 미만이거나 SLO 값이 잘못된 경우.
     """
 
     if target_tps <= 0:
         raise ValueError("target_tps는 1 이상이어야 합니다.")
+
+    slo_ms = _resolve_p95_slo_ms(p95_slo_ms)
 
     load_test_json = json.dumps(
         asdict(load_test_result),
@@ -90,11 +225,33 @@ def build_bottleneck_analysis_prompt(
         indent=2,
     )
 
-    system_metrics_json = json.dumps(
-        asdict(system_metrics),
-        ensure_ascii=False,
-        indent=2,
+    system_metrics_json = _serialize_system_metrics(
+        system_metrics,
+        resource_metrics_collected,
     )
+
+    metrics_description = _build_metrics_description(
+        resource_metrics_collected
+    )
+
+    analysis_items = [
+        "- 목표 TPS를 실제로 달성했는지",
+        f"- P95 응답 시간이 SLO({slo_ms}ms)를 충족하는지, 평균 응답 시간은 어떤지",
+        "- 오류율이 허용 가능한 수준인지",
+    ]
+
+    if resource_metrics_collected:
+        analysis_items.append("- CPU 또는 메모리 사용량이 과도한지")
+
+    analysis_items.extend(
+        [
+            "- 활성 연결 수가 병목에 영향을 주는지",
+            "- 현재 문제가 일시적인 트래픽 증가인지 구조적인 병목인지",
+            "- 컨테이너 스케일링이 필요한지",
+        ]
+    )
+
+    analysis_text = "\n".join(analysis_items)
 
     # 실제 측정 데이터와 LLM이 반환해야 할 JSON 구조를 함께 전달한다.
     return f"""
@@ -104,6 +261,14 @@ def build_bottleneck_analysis_prompt(
 [사용자가 요청한 목표 TPS]
 
 {target_tps}
+
+[판단 기준]
+
+- P95 응답 시간 SLO: {slo_ms}ms 이하
+  (Locust 결과의 latency_p95, 전체 요청 기준)
+- latency_p95가 SLO를 넘으면 SLO 위반입니다.
+  위반했다면 그 원인을 측정값으로 설명하고,
+  컨테이너 수를 늘려 해소될 수 있는 병목인지 판단하세요.
 
 [스케일링 대상 서비스]
 
@@ -118,15 +283,13 @@ def build_bottleneck_analysis_prompt(
 
 {system_metrics_json}
 
+[메트릭 설명]
+
+{metrics_description}
+
 다음 내용을 분석하세요.
 
-- 목표 TPS를 실제로 달성했는지
-- 평균 응답 시간과 P95 응답 시간이 적절한지
-- 오류율이 허용 가능한 수준인지
-- CPU 또는 메모리 사용량이 과도한지
-- 활성 연결 수가 병목에 영향을 주는지
-- 현재 문제가 일시적인 트래픽 증가인지 구조적인 병목인지
-- 컨테이너 스케일링이 필요한지
+{analysis_text}
 
 반드시 다음 JSON 구조로만 응답하세요.
 
@@ -147,6 +310,7 @@ def build_bottleneck_analysis_prompt(
 - bottleneck_report.cause:
   병목 원인을 구체적인 측정값을 근거로 설명합니다.
   병목이 없다면 정상이라고 판단한 근거를 작성합니다.
+  "측정 불가"로 표시된 항목은 근거로 쓰지 않습니다.
 
 - bottleneck_report.severity:
   반드시 "low", "medium", "high" 중 하나를 사용합니다.
@@ -173,7 +337,7 @@ def build_bottleneck_analysis_prompt(
   진단이 정상적으로 완료되었다면 반드시 "diagnosed"를 반환합니다.
 
 - scaling_plan:
-  bottleneck_report.requires_scaling이 true인 경우 
+  bottleneck_report.requires_scaling이 true인 경우
   반드시 다음 구조로 작성합니다.
   {{
     "service_name": "{service_name}",
@@ -210,6 +374,9 @@ def build_revalidation_prompt(
     current_load_test_result: LoadTestResult,
     previous_system_metrics: SystemMetrics,
     current_system_metrics: SystemMetrics,
+    *,
+    resource_metrics_collected: bool = RESOURCE_METRICS_COLLECTED,
+    p95_slo_ms: int | None = None,
 ) -> str:
     """
     스케일링 전후의 성능 데이터를 비교하기 위한 프롬프트를 생성한다.
@@ -230,11 +397,21 @@ def build_revalidation_prompt(
     current_system_metrics:
         스케일링 후 Prometheus 시스템 메트릭.
 
+    resource_metrics_collected:
+        cpu_pct / mem_pct를 실제로 수집하는지 여부.
+        False면 두 값을 "측정 불가"로 표시하고 변화량을 null로 받는다.
+
+    p95_slo_ms:
+        P95 응답 시간 SLO(ms). None이면 P95_SLO_MS 환경변수
+        (없으면 DEFAULT_P95_SLO_MS)를 사용한다.
+
     Returns
     -------
     str
         스케일링 전후 성능 비교를 위한 프롬프트.
     """
+
+    slo_ms = _resolve_p95_slo_ms(p95_slo_ms)
 
     previous_load_test_json = json.dumps(
         asdict(previous_load_test_result),
@@ -248,22 +425,75 @@ def build_revalidation_prompt(
         indent=2,
     )
 
-    previous_metrics_json = json.dumps(
-        asdict(previous_system_metrics),
-        ensure_ascii=False,
-        indent=2,
+    previous_metrics_json = _serialize_system_metrics(
+        previous_system_metrics,
+        resource_metrics_collected,
     )
 
-    current_metrics_json = json.dumps(
-        asdict(current_system_metrics),
-        ensure_ascii=False,
-        indent=2,
+    current_metrics_json = _serialize_system_metrics(
+        current_system_metrics,
+        resource_metrics_collected,
     )
+
+    metrics_description = _build_metrics_description(
+        resource_metrics_collected
+    )
+
+    comparison_items = [
+        "- 실제 처리 TPS 변화",
+        "- 평균 응답 시간 변화",
+        "- P95 응답 시간 변화",
+        f"- 스케일링 후 P95 응답 시간이 SLO({slo_ms}ms)를 충족하는지",
+        "- 오류율 변화",
+    ]
+
+    if resource_metrics_collected:
+        comparison_items.extend(
+            [
+                "- CPU 사용률 변화",
+                "- 메모리 사용률 변화",
+            ]
+        )
+
+    comparison_items.extend(
+        [
+            "- 활성 연결 수 변화",
+            "- 스케일링 조치의 전체적인 효과",
+        ]
+    )
+
+    comparison_text = "\n".join(comparison_items)
+
+    if resource_metrics_collected:
+        resource_change_template = "0.0"
+        cpu_change_rule = (
+            "스케일링 후 CPU 사용률에서\n"
+            "  스케일링 전 CPU 사용률을 뺀 값입니다."
+        )
+        mem_change_rule = (
+            "스케일링 후 메모리 사용률에서\n"
+            "  스케일링 전 메모리 사용률을 뺀 값입니다."
+        )
+    else:
+        resource_change_template = "null"
+        cpu_change_rule = (
+            "CPU 사용률은 측정 불가이므로\n"
+            "  반드시 null을 반환합니다."
+        )
+        mem_change_rule = (
+            "메모리 사용률은 측정 불가이므로\n"
+            "  반드시 null을 반환합니다."
+        )
 
     return f"""
 다음은 컨테이너 스케일링 전후의 성능 측정 결과입니다.
 
 각 데이터를 비교하여 스케일링으로 성능이 개선되었는지 분석하세요.
+
+[판단 기준]
+
+- P95 응답 시간 SLO: {slo_ms}ms 이하
+  (Locust 결과의 latency_p95, 전체 요청 기준)
 
 [스케일링 전 Locust 결과]
 
@@ -281,16 +511,13 @@ def build_revalidation_prompt(
 
 {current_metrics_json}
 
+[메트릭 설명]
+
+{metrics_description}
+
 다음 항목을 비교하세요.
 
-- 실제 처리 TPS 변화
-- 평균 응답 시간 변화
-- P95 응답 시간 변화
-- 오류율 변화
-- CPU 사용률 변화
-- 메모리 사용률 변화
-- 활성 연결 수 변화
-- 스케일링 조치의 전체적인 효과
+{comparison_text}
 
 모든 변화량은 반드시 다음 기준으로 계산하세요.
 
@@ -319,8 +546,8 @@ def build_revalidation_prompt(
   "latency_avg_change": 0.0,
   "latency_p95_change": 0.0,
   "error_rate_change": 0.0,
-  "cpu_pct_change": 0.0,
-  "mem_pct_change": 0.0,
+  "cpu_pct_change": {resource_change_template},
+  "mem_pct_change": {resource_change_template},
   "connection_count_change": 0,
   "additional_action_required": false,
   "recommended_action": null
@@ -330,6 +557,7 @@ def build_revalidation_prompt(
 
 - summary:
   스케일링 전후의 주요 변화를 측정값을 근거로 요약합니다.
+  "측정 불가"로 표시된 항목은 근거로 쓰지 않습니다.
 
 - performance_improved:
   TPS, 지연 시간, 오류율 및 시스템 메트릭을 종합적으로 판단하여
@@ -350,19 +578,17 @@ def build_revalidation_prompt(
   스케일링 후 오류율에서 스케일링 전 오류율을 뺀 값입니다.
 
 - cpu_pct_change:
-  스케일링 후 CPU 사용률에서
-  스케일링 전 CPU 사용률을 뺀 값입니다.
+  {cpu_change_rule}
 
 - mem_pct_change:
-  스케일링 후 메모리 사용률에서
-  스케일링 전 메모리 사용률을 뺀 값입니다.
+  {mem_change_rule}
 
 - connection_count_change:
   스케일링 후 활성 연결 수에서
   스케일링 전 활성 연결 수를 뺀 값입니다.
 
 - additional_action_required:
-  스케일링 후에도 목표 성능을 달성하지 못했거나
+  스케일링 후에도 P95 응답 시간이 SLO({slo_ms}ms)를 충족하지 못했거나
   다른 병목이 남아 있다면 true를 반환합니다.
 
 - recommended_action:

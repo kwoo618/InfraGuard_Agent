@@ -9,14 +9,17 @@ AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 �
 
 사후 알림이 아닌 **사전 진단 + 자율 판단 + HITL 승인** 후 실행이 핵심 가치다.
 
-## 팀 역할 분담
+## 팀 구성
 
-| 팀원 | 역할 | 담당 파일 |
-|---|---|---|
-| 이하은 | 부하 생성 | `tools/run_load_test.py`, `infra/locust/` |
-| 박정기 | 진단 에이전트 | `app/agent/`, `tools/generate_plan.py` |
-| 최강우 | 스케일링 & 인프라 | `tools/get_metrics.py`, `tools/scale_service.py`, `infra/`, `docker-compose.yml` |
-| 최소명 | API & UI | `app/api/`, `app/static/`, `app/main.py` |
+- 원 개발: 대구대 부트캠프 2팀 4인 (이하은 부하 생성, 박정기 진단 에이전트, 최강우 스케일링·인프라, 최소명 API·UI)
+- 현재 (2026 우수작품경진대회 출품): 최강우, 최소명 2인
+
+| 팀원 | 역할 |
+|---|---|
+| 최강우 | 추가 개발 전체 (백엔드·에이전트·인프라·UI) |
+| 최소명 | PR 리뷰, 발표 자료 |
+
+> 파일별 소유권 규칙은 없다. 누구든 수정할 수 있으나, 인터페이스(schemas.py/state.py) 변경은 PR에 명시한다.
 
 ## 커맨드
 
@@ -29,11 +32,12 @@ pip install -r backend/requirements.txt
 # 전체 테스트
 pytest tests/
 
-# 역할별 단위 테스트
-pytest tests/unit/test_load_runner.py -v   # 이하은
-pytest tests/unit/test_agent.py -v         # 박정기
-pytest tests/unit/test_metrics.py -v       # 최강우
-pytest tests/unit/test_api.py -v           # 최소명
+# 단위 테스트
+pytest tests/unit/test_load_runner.py -v
+pytest tests/unit/test_agent.py -v
+pytest tests/unit/test_metrics.py -v
+pytest tests/unit/test_prompts.py -v
+pytest tests/unit/test_api.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -48,54 +52,55 @@ open http://localhost:9090   # Prometheus
 open http://localhost:3000   # Grafana
 ```
 
-## 파일 구조 및 소유권
+## 파일 구조
 
 ```
 InfraGuard_Agent
 ├── backend
 │   ├── app
 │   │   ├── agent
-│   │   │   ├── engine.py          # 박정기 - ReAct Loop 오케스트레이터
-│   │   │   ├── state.py           # 박정기 - Agent 런타임 상태 정의
-│   │   │   ├── prompts.py         # 박정기 - 시스템 프롬프트
-│   │   │   └── nodes.py           # 박정기 - LLM reasoning node
+│   │   │   ├── engine.py          # ReAct Loop 오케스트레이터
+│   │   │   ├── state.py           # Agent 런타임 상태 정의
+│   │   │   ├── prompts.py         # 시스템 프롬프트
+│   │   │   └── nodes.py           # LLM reasoning node
 │   │   ├── tools
-│   │   │   ├── run_load_test.py   # 이하은 - Locust 실행 + 결과 파싱
-│   │   │   ├── get_metrics.py     # 최강우 - Prometheus 쿼리
-│   │   │   ├── scale_service.py   # 최강우 - Docker replica 조정
-│   │   │   └── generate_plan.py   # 박정기 - 최적화 플랜 생성
+│   │   │   ├── run_load_test.py   # Locust 실행 + 결과 파싱
+│   │   │   ├── get_metrics.py     # Prometheus 쿼리
+│   │   │   ├── scale_service.py   # Docker replica 조정
+│   │   │   └── generate_plan.py   # 최적화 플랜 생성
 │   │   ├── api
 │   │   │   └── v1
-│   │   │       └── agent.py       # 최소명 - /start /approve /report
-│   │   ├── static                 # 최소명 - SSE UI + HITL 버튼
+│   │   │       └── agent.py       # /start /approve /report
+│   │   ├── static                 # SSE UI + HITL 버튼
 │   │   │   ├── index.html
 │   │   │   ├── main.js
 │   │   │   └── style.css
-│   │   └── main.py                # 최소명 - FastAPI 앱 진입점
+│   │   └── main.py                # FastAPI 앱 진입점
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── infra
 │   ├── locust
-│   │   ├── locustfile.py          # 이하은 - 부하 시나리오
-│   │   └── locust.conf            # 이하은 - TPS 상한 설정
+│   │   ├── locustfile.py          # 부하 시나리오
+│   │   └── locust.conf            # 부하 기본 설정 (동시 가상 사용자 기본값 50)
 │   ├── nginx
-│   │   └── nginx.conf             # 최강우 - target-server 로드밸런서 (localhost:8080)
+│   │   └── nginx.conf             # target-server 로드밸런서 (localhost:8080)
 │   ├── prometheus
-│   │   └── prometheus.yml         # 최강우
+│   │   └── prometheus.yml
 │   ├── grafana
-│   │   └── dashboard.json         # 최강우
-│   └── target-server              # 최강우 - 부하 받을 샘플 앱
+│   │   └── dashboard.json
+│   └── target-server              # 부하 받을 샘플 앱
 │       ├── main.py
 │       └── Dockerfile
 ├── tests
 │   ├── unit
-│   │   ├── test_load_runner.py    # 이하은
-│   │   ├── test_metrics.py        # 최강우
-│   │   ├── test_agent.py          # 박정기
-│   │   └── test_api.py            # 최소명
+│   │   ├── test_load_runner.py
+│   │   ├── test_metrics.py
+│   │   ├── test_prompts.py
+│   │   ├── test_agent.py
+│   │   └── test_api.py
 │   └── integration
 │       └── test_e2e.py
-├── docker-compose.yml             # 최강우
+├── docker-compose.yml
 ├── .env.example
 ├── CLAUDE.md
 ├── CONTRIBUTING.md
@@ -184,7 +189,7 @@ HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병
 ## 가드레일
 
 - `MAX_LOOP = 10` — ReAct Loop 최대 반복 횟수. 초과 시 `agent_outcome = "failed"` 처리
-- Locust 부하 상한 **50 TPS** — 로컬 환경 CPU 고갈 방지 (`locust.conf`로 관리)
+- Locust 부하 상한 **동시 가상 사용자 50** — 로컬 환경 CPU 고갈 방지. `run_load_test.py`가 target_tps를 Locust `--users`로 넘기고 `MAX_TPS = 50`으로 막는다 (`locust.conf`의 users 기본값도 50). 처리량(TPS) 상한이 아니다 — 스케일 후 실측 98.5 TPS (docs/02 ISSUE-11)
 - `scale_service` replica 최대 **8개**
 - 에이전트 루프 `asyncio.timeout(300)` — 5분 초과 시 강제 종료
 
@@ -204,6 +209,8 @@ LANGFUSE_PUBLIC_KEY=
 PROMETHEUS_URL=http://localhost:9090
 MAX_LOOP=10
 TARGET_SERVER_URL=http://localhost:8080
+P95_SLO_MS=1000                # P95 SLO(ms), 진단 프롬프트 판단 기준 (docs/02 ISSUE-10)
+DEBUG_ENDPOINTS_ENABLED=false  # 디버그 전용(force_scaling), 발표·측정 시 반드시 false
 ```
 
 ## 테스트 작성 시 주의사항
@@ -228,12 +235,14 @@ TARGET_SERVER_URL=http://localhost:8080
 
 ### 절대 원칙
 - 측정하지 않은 수치를 코드·UI·문서에 하드코딩하거나 예시값을 실측처럼 표시하지 않는다.
-- 가드레일 값(MAX_LOOP 10, 50 TPS, replica 8, timeout 300, confidence 0.6)은 변경 금지.
+- 가드레일 값(MAX_LOOP 10, Locust 동시 가상 사용자 50, replica 8, timeout 300, confidence 0.6)은 변경 금지.
 - 기존 API 응답 필드는 삭제·이름 변경 금지 (추가만 허용).
 - 변경 후 반드시 `pytest tests/` 통과 확인.
 
 ### 알려진 이슈
 - ~~prometheus.yml이 target-server 단일 타깃이라 스케일 후 메트릭이 과소집계됨~~ → **해결됨** (Phase 1, dns_sd_configs 적용. 2026-09-11 replica 3개 모두 UP 확인, docs/02 ISSUE-2)
 - ~~스케일 아웃해도 부하가 replica 1개로만 감 / 재생성 후 호스트 8080이 비어 부하 대상이 사라짐~~ → **해결됨** (Phase 2, nginx 로드밸런서가 호스트 8080 고정, target-server replica는 호스트 포트 없음. 2026-09-11 replica 3개 균등 분산·재생성 후 8080 유지 확인, docs/02 ISSUE-1·9)
-- Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음
+- ~~LLM 진단 입력에 CPU/메모리 0% 고정값이 측정값처럼 들어가고 P95 판단 기준이 없음~~ → **해결됨** (#78, 미수집 항목 "측정 불가" 표시 + `P95_SLO_MS` 기본 1000ms. 2026-09-11 5회 모두 CPU/메모리를 근거에서 제외·SLO 언급 확인, target_tps 50 3회 중 2회 스케일링 제안, docs/02 ISSUE-10)
+- Windows Docker Desktop에서 cAdvisor `name` 라벨 미지원 → CPU/Mem/Replica 패널 비어 있음 (LLM 입력에는 "측정 불가"로 표시, #78)
+- target_tps는 처리량이 아니라 Locust 동시 가상 사용자 수(`--users`)다. UI·프롬프트의 "목표 TPS" 표기가 오해를 만든다 (docs/02 ISSUE-11, 기록만)
 - Grafana datasource/dashboard 프로비저닝 설정 없음 (수동 import 필요)
