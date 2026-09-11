@@ -23,8 +23,8 @@ class AgentRuntimeState(TypedDict):
     task_id: str
 
 
-    # 사용자가 요청한 목표 TPS
-    # Locust가 초당 몇 건의 요청을 발생시킬지 나타낸다.
+    # 동시 가상 사용자 수 (Locust --users). 이름과 달리 처리량(TPS) 목표가 아니다 (docs/02 ISSUE-11).
+    # 초당 요청 수는 wait_time과 응답 시간에 따라 달라지며, 측정 처리량은 LoadTestResult.tps다.
     target_tps: int
 
     # 사용자가 요청한 부하 테스트 실행 시간

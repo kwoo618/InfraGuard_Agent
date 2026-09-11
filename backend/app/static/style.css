@@ -987,6 +987,19 @@ button:active{
     transform: none;
 }
 
+/* 새 실행을 막는 이유 (동시 실행 방지, docs/02 ISSUE-17) */
+.busy-note {
+    flex-basis: 100%;
+    color: #ffa500;
+    font-size: 13px;
+}
+
+#start-btn:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    transform: none;
+}
+
 /* ================= 부하 중 그래프 (docs/03 Phase 4 그래프) ================= */
 /* 라운드별 색. 선·점·막대·범례가 같은 클래스를 쓴다 */
 .series-0 { --series-color: #f0883e; }

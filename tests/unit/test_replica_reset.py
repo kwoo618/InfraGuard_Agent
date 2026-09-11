@@ -3,6 +3,7 @@
 
 초기화는 측정 회차 사이 사람의 수동 조작이다. 에이전트 실행 중(승인 대기 포함)이거나
 다른 초기화가 진행 중이면 409로 거부하고, 결과 파일(results/)에는 기록하지 않는다.
+끊긴 실행의 부하 테스트가 남아 있을 때의 거부는 test_run_gate.py에서 확인한다.
 
 실제 Docker는 실행하지 않는다. scale_service와 replica 조회를 가짜로 바꾸고 결과 파일은 tmp_path에만 쓴다.
 """
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.agent.state import create_initial_state
 from app.api.v1 import agent, run_history
-from app.api.v1.agent import run_records
+from app.api.v1.agent import load_tests, run_records
 from app.api.v1.run_history import RunRecorder
 from app.main import app
 from app.schemas import ScalingResult
@@ -27,8 +28,10 @@ def results_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "_replica_reset_in_progress", False)
 
     run_records.clear()
+    load_tests.clear()
     yield directory
     run_records.clear()
+    load_tests.clear()
 
 
 @pytest.fixture
@@ -125,7 +128,7 @@ def test_get_replicas(monkeypatch, docker_value, expected):
     response = TestClient(app).get("/api/v1/agent/replicas")
 
     assert response.status_code == 200
-    assert response.json() == {"replicas": expected, "busy": False}
+    assert response.json() == {"replicas": expected, "busy": False, "busy_reason": None}
 
 
 def test_get_replicas_reports_busy_while_running(monkeypatch):
@@ -134,4 +137,4 @@ def test_get_replicas_reports_busy_while_running(monkeypatch):
 
     response = TestClient(app).get("/api/v1/agent/replicas")
 
-    assert response.json() == {"replicas": 1, "busy": True}
+    assert response.json() == {"replicas": 1, "busy": True, "busy_reason": "agent_running"}

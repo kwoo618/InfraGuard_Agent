@@ -67,6 +67,7 @@ SCALING_PLAN = {
 
 
 def _clear_agent_storage() -> None:
+    agent.load_tests.clear()
     task_manager.states.clear()
     task_manager.futures.clear()
     task_manager.low_confidence.clear()
@@ -1213,3 +1214,34 @@ async def test_stream_load_test_failure_through_capture_node(
     assert data["measurement_history"] == []
     assert data["outcome"]["end_reason"] == "failed"
     assert "부하 테스트 실행 실패" in data["outcome"]["error"]
+
+
+async def test_stream_records_headline_source(
+    results_dir,
+    fake_infra,
+    monkeypatch,
+):
+    """결과 파일 측정 레코드에 헤드라인·엔드포인트 통계의 계산 출처가 남는다 (#85, docs/02 ISSUE-15)."""
+
+    details = json.loads(json.dumps(GRAPH_DETAILS))
+    details.update(headline_source="locust_final_stats", endpoints_source="locust_final_stats")
+
+    def fake_detailed(target_tps, duration):
+        return _load_result(50.0, 3000.0), details
+
+    async def counts():
+        return {}
+
+    monkeypatch.setattr(agent, "run_load_test_detailed", fake_detailed)
+    monkeypatch.setattr(agent, "get_request_counts_by_instance", counts)
+    monkeypatch.setattr(agent, "INSTANCE_SNAPSHOT_DELAY_SEC", 0.0)
+    monkeypatch.setattr(agent, "run_diagnosis", _fake_diagnosis_using_load_node())
+
+    events = await _run_stream()
+
+    assert events[-1]["status"] == "done"
+
+    [record] = _only_result_file(results_dir)["measurement_history"]
+
+    assert record["headline_source"] == "locust_final_stats"
+    assert record["endpoints_source"] == "locust_final_stats"

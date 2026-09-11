@@ -1,11 +1,12 @@
 """
-test_prompts.py — 병목 진단 / 재검증 프롬프트 빌더 단위 테스트 (docs/02 ISSUE-10).
+test_prompts.py — 병목 진단 / 재검증 프롬프트 빌더 단위 테스트 (docs/02 ISSUE-10, ISSUE-11).
 
 확인하는 것:
   1. CPU/메모리 미수집 환경에서 0.0이 측정값처럼 들어가지 않는지
   2. P95 SLO(P95_SLO_MS) 기준이 프롬프트에 들어가는지
   3. 활성 연결 수(connection_count) 설명이 들어가는지
   4. "무조건 스케일링하지 않는다" 원칙이 유지되는지
+  5. target_tps를 "목표 TPS"가 아니라 동시 가상 사용자 수로 전달하는지 (#88)
 
 LLM / Docker / Prometheus는 호출하지 않는다. 아래 수치는 빌더 입력용 테스트 값이다.
 """
@@ -20,7 +21,8 @@ from app.agent.prompts import (
     build_revalidation_prompt,
     get_p95_slo_ms,
 )
-from app.schemas import LoadTestResult, SystemMetrics
+from app.schemas import BottleneckReport, LoadTestResult, SystemMetrics
+from app.tools.generate_plan import generate_optimization_plan
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────────────
@@ -182,3 +184,43 @@ def test_revalidation_prompt_keeps_values_when_collected():
 def test_system_prompt_keeps_no_forced_scaling_principle():
     assert "무조건 스케일링을 제안하지 않습니다." in SYSTEM_PROMPT
     assert '"측정 불가"로 표시된 항목은 판단 근거로 사용하지 않으며' in SYSTEM_PROMPT
+
+
+# ── 5. 동시 가상 사용자 수 표기 (#88, docs/02 ISSUE-11) ────────────────────────
+# target_tps는 Locust --users(동시 가상 사용자 수)다. "목표 TPS"로 주면 LLM이 처리량과 비교해
+# "목표 TPS 50 미달성(39.08 TPS)" 같은 잘못된 근거를 만든다 (2026-09-11 233316 R1).
+
+def test_bottleneck_prompt_describes_users_not_target_tps():
+    prompt = _bottleneck_prompt(p95_slo_ms=1000)
+
+    assert "목표 TPS" not in prompt
+    assert "[부하 조건]" in prompt
+    assert "동시 가상 사용자 50명 (Locust 동시 접속 수, 처리량 목표 아님)" in prompt
+    # 처리량을 동시 사용자 수와 비교해 달성 여부를 묻는 분석 항목이 없다
+    assert "달성했는지" not in prompt
+    # 판단 기준은 P95 SLO 중심 그대로다
+    assert "SLO: 1000ms 이하" in prompt
+
+
+def test_revalidation_and_system_prompts_have_no_target_tps():
+    assert "목표 TPS" not in _revalidation_prompt(p95_slo_ms=1000)
+    assert "목표 TPS" not in SYSTEM_PROMPT
+
+
+def test_optimization_plan_does_not_compare_tps_with_users():
+    """측정 TPS(40)가 동시 가상 사용자 수(50)보다 작아도 "목표 TPS 미달" 조치 항목을 만들지 않는다."""
+    plans = generate_optimization_plan(
+        target_tps=50,
+        load_test_result=_load_test_result(),
+        system_metrics=_system_metrics(),
+        bottleneck_report=BottleneckReport(
+            cause="테스트 원인",
+            severity="high",
+            recommendation="테스트 권장 조치",
+            confidence=0.8,
+            requires_scaling=False,
+        ),
+    )
+
+    assert not any("목표 TPS" in plan for plan in plans)
+    assert "테스트 권장 조치" in plans

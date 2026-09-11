@@ -3,21 +3,28 @@ run_load_test.py
 Locust 실행 + 결과 파싱 Tool.
 
 ReAct Loop의 첫 Action으로 호출되어 target-server에 실제 부하를 발생시키고,
-Locust의 CSV 통계 출력을 파싱해 LoadTestResult로 변환한다.
+Locust의 통계 출력을 파싱해 LoadTestResult로 변환한다.
 
 `infra/locust/locustfile.py` 시나리오를 headless 모드(`-f`, `--headless`)로
-서브프로세스 실행하고, `--csv` 옵션으로 떨어지는 `<prefix>_stats.csv`의
-Aggregated 행을 읽어 TPS/Latency/에러율을 계산한다.
+서브프로세스 실행하고 `--csv` prefix를 넘긴다.
+
+헤드라인 값(LoadTestResult)의 출처 (#85, docs/02 ISSUE-15):
+- 우선 locustfile이 부하가 멈춘 뒤 쓰는 `<prefix>_final_stats.json`(Locust runner.stats 최종값)을 쓴다.
+  `_stats.csv`의 Aggregated 행과 같은 계산이고, 부하 전체의 요청이 들어간다.
+- 이 파일이 없거나 읽지 못하면 `<prefix>_stats.csv`의 Aggregated 행을 쓴다. Locust는 `_stats.csv`를
+  1초마다 다시 쓰고 종료 시에는 닫기만 해서, 이 경우 부하 마지막 약 1초의 요청이 빠질 수 있다.
+- run_load_test_detailed()는 어느 쪽을 썼는지 details["headline_source"]로 알려 준다.
 
 결과 패널 그래프용 추가 데이터 (docs/03 Phase 4 그래프, #75):
 run_load_test_detailed()는 같은 실행에서 LoadTestResult와 함께
 - 초 단위 TPS·P95 시계열: locustfile이 쓰는 `<prefix>_requests.csv`(요청별 원시 기록)
-- 엔드포인트별 통계: `<prefix>_stats.csv`의 엔드포인트 행
+- 엔드포인트별 통계: 종료 시 통계의 엔드포인트 항목 (없으면 `_stats.csv`의 엔드포인트 행)
 을 돌려준다. LoadTestResult(schemas.py)는 바꾸지 않는다. 추가 데이터 파싱이 실패해도
 LoadTestResult는 그대로 반환하고 해당 항목만 None이다.
 """
 
 import csv
+import json
 import logging
 import math
 import os
@@ -30,9 +37,11 @@ from app.schemas import LoadTestResult
 
 logger = logging.getLogger(__name__)
 
-# CLAUDE.md 가드레일: "Locust 부하 상한 50 TPS" — 로컬 PC 한 대에서
+# CLAUDE.md 가드레일: Locust 동시 가상 사용자 상한 50 — 로컬 PC 한 대에서
 # Locust + target-server + Prometheus + 백엔드를 동시에 돌리기 때문에
-# CPU가 고갈되지 않도록 가상 사용자 수(≈TPS) 상한을 둔다.
+# CPU가 고갈되지 않도록 동시 가상 사용자 수(--users)의 상한을 둔다.
+# 처리량(TPS) 상한이 아니다. 측정 TPS는 이 값을 넘을 수 있다 (docs/02 ISSUE-11).
+# 이름(MAX_TPS)은 기존 코드·테스트 호환을 위해 그대로 둔다.
 MAX_TPS = 50
 
 # 이 파일(backend/app/tools/run_load_test.py)을 기준으로 프로젝트 루트를 계산한다.
@@ -50,8 +59,14 @@ LOCUSTFILE = LOCUST_DIR / "locustfile.py"
 # .env의 TARGET_SERVER_URL을 우선 사용하고, 없으면 docker-compose 기본 포트(8080)로 폴백.
 DEFAULT_HOST = os.getenv("TARGET_SERVER_URL", "http://localhost:8080")
 
-# locustfile.py REQUEST_LOG_SUFFIX와 같아야 한다 (locust를 import하지 않으려고 값을 따로 둔다)
+# locustfile.py REQUEST_LOG_SUFFIX / FINAL_STATS_SUFFIX와 같아야 한다
+# (locust를 import하면 백엔드 프로세스에 gevent 패치가 적용되므로 값을 따로 둔다)
 REQUEST_LOG_SUFFIX = "_requests.csv"
+FINAL_STATS_SUFFIX = "_final_stats.json"
+
+# 헤드라인·엔드포인트 통계의 출처 (결과 파일 measurement_history 레코드에 기록된다)
+SOURCE_FINAL_STATS = "locust_final_stats"   # Locust 종료 시 통계: 부하 전체 요청
+SOURCE_STATS_CSV = "locust_stats_csv"       # _stats.csv: 마지막 약 1초 누락 가능
 
 # 초 단위 시계열 구간 길이(초)와 P95 계산 방식
 TIMESERIES_BUCKET_SEC = 1
@@ -75,10 +90,10 @@ def run_load_test(
     """Locust 부하 테스트를 실행하고 결과를 LoadTestResult로 반환한다.
 
     Args:
-        target_tps: 목표 TPS(=가상 사용자 수로 근사). MAX_TPS를 넘을 수 없다.
-            locustfile.py의 wait_time(0.1~0.5초)을 기준으로 설계했기 때문에
-            "가상 사용자 1명 ≈ 초당 요청 1~2건" 정도로 근사된다. 정확한 TPS는
-            Locust가 직접 측정한 값(결과의 tps 필드)을 신뢰해야 한다.
+        target_tps: 동시 가상 사용자 수(Locust --users). 이름과 달리 처리량(TPS) 목표가 아니다
+            (docs/02 ISSUE-11). MAX_TPS를 넘을 수 없다. 초당 요청 수는 locustfile.py의
+            wait_time(0.1~0.5초)과 응답 시간에 따라 달라지므로, 처리량은 Locust가 측정한 값
+            (결과의 tps 필드)을 쓴다.
         duration: 부하 테스트 지속 시간(초). Locust의 --run-time 옵션에 그대로 전달.
         host: 부하를 받을 target-server 주소. 기본값은 DEFAULT_HOST.
         spawn_rate: 초당 추가로 생성할 가상 사용자 수(--spawn-rate).
@@ -88,6 +103,7 @@ def run_load_test(
     Returns:
         LoadTestResult: tps, latency_p95, latency_avg, error_rate, duration,
         total_requests를 담은 dataclass (schemas.py 정의, 박정기 nodes.py가 소비).
+        값은 Locust 종료 시 통계(없으면 _stats.csv Aggregated 행)에서 온다.
 
     Raises:
         ValueError: target_tps/duration이 가드레일을 벗어난 경우.
@@ -110,13 +126,20 @@ def run_load_test_detailed(
         (LoadTestResult, details)
         - LoadTestResult: run_load_test와 같은 값
         - details["timeseries"]: 초 단위 요청 수·실패 수·P95 (요청별 원시 기록 기준). 없거나 파싱 실패면 None
-        - details["endpoints"]: 엔드포인트별 Locust 통계 행. 파싱 실패면 None
+        - details["endpoints"]: 엔드포인트별 Locust 통계. 파싱 실패면 None
+        - details["headline_source"]: LoadTestResult 값의 출처 (SOURCE_FINAL_STATS / SOURCE_STATS_CSV)
+        - details["endpoints_source"]: endpoints의 출처 (같은 값 중 하나, 없으면 None)
 
     Raises:
         run_load_test와 같다. 추가 데이터 파싱 실패로는 예외를 던지지 않는다.
     """
     result, details = _run_locust(target_tps, duration, host, spawn_rate, collect_details=True)
-    return result, details or {"timeseries": None, "endpoints": None}
+    return result, details or {
+        "timeseries": None,
+        "endpoints": None,
+        "headline_source": None,
+        "endpoints_source": None,
+    }
 
 
 def _run_locust(
@@ -139,7 +162,8 @@ def _run_locust(
     # with 블록을 빠져나가면 디렉터리가 자동 삭제되므로 디스크에 테스트 잔여물이 남지 않는다.
     with tempfile.TemporaryDirectory() as tmp_dir:
         # Locust --csv 옵션은 "prefix"를 받아 prefix_stats.csv / prefix_failures.csv 등을 생성한다.
-        # locustfile.py는 같은 prefix로 prefix_requests.csv(요청별 원시 기록)를 쓴다.
+        # locustfile.py는 같은 prefix로 prefix_requests.csv(요청별 원시 기록)와
+        # prefix_final_stats.json(종료 시 통계)을 쓴다.
         csv_prefix = str(Path(tmp_dir) / "result")
 
         cmd = [
@@ -150,7 +174,7 @@ def _run_locust(
             "--host",
             host,                  # 부하를 받을 target-server 주소
             "--users",
-            str(target_tps),       # 동시 가상 사용자 수 (target_tps로 근사)
+            str(target_tps),       # 동시 가상 사용자 수 (target_tps = --users, 처리량 목표 아님)
             "--spawn-rate",
             str(spawn_rate or target_tps),  # 초당 사용자 증가 속도
             "--run-time",
@@ -191,43 +215,118 @@ def _run_locust(
                 f"Locust 결과 파일을 찾을 수 없습니다 (exit={process.returncode}): {stderr}"
             )
 
-        result = _parse_stats_csv(stats_path, duration)
+        # 헤드라인: 종료 시 통계 우선, 없거나 읽지 못하면 _stats.csv
+        final_stats = _safe_details(
+            "종료 시 통계",
+            _read_final_stats,
+            Path(f"{csv_prefix}{FINAL_STATS_SUFFIX}"),
+        )
+        result = _safe_details("종료 시 통계 헤드라인", _result_from_final_stats, final_stats, duration) if final_stats else None
+
+        if result is not None:
+            headline_source = SOURCE_FINAL_STATS
+        else:
+            logger.warning(
+                "Locust 종료 시 통계가 없어 _stats.csv로 헤드라인을 계산한다 (마지막 약 1초 누락 가능, #85)"
+            )
+            result = _parse_stats_csv(stats_path, duration)
+            headline_source = SOURCE_STATS_CSV
 
         if not collect_details:
             return result, None
 
         # 임시 디렉터리가 지워지기 전에 읽는다. 실패해도 LoadTestResult는 그대로 반환한다.
+        endpoints = None
+        endpoints_source = None
+
+        if final_stats:
+            endpoints = _safe_details("종료 시 엔드포인트 통계", _endpoints_from_final_stats, final_stats)
+            endpoints_source = SOURCE_FINAL_STATS if endpoints is not None else None
+
+        if endpoints is None:
+            endpoints = _safe_details("엔드포인트별 통계", _parse_endpoint_rows, stats_path)
+            endpoints_source = SOURCE_STATS_CSV if endpoints is not None else None
+
         details = {
             "timeseries": _safe_details(
                 "초 단위 시계열",
                 _parse_request_log,
                 Path(f"{csv_prefix}{REQUEST_LOG_SUFFIX}"),
             ),
-            "endpoints": _safe_details(
-                "엔드포인트별 통계",
-                _parse_endpoint_rows,
-                stats_path,
-            ),
+            "endpoints": endpoints,
+            "headline_source": headline_source,
+            "endpoints_source": endpoints_source,
         }
 
         return result, details
 
 
-def _safe_details(label: str, parser, path: Path):
+def _safe_details(label: str, parser, *args):
     """추가 데이터 파서를 실행한다. 실패하면 로그만 남기고 None (에이전트 흐름을 멈추지 않는다)."""
     try:
-        return parser(path)
+        return parser(*args)
     except Exception:
-        logger.warning("Locust %s 파싱 실패 (LoadTestResult는 정상 반환): %s", label, path, exc_info=True)
+        logger.warning("Locust %s 파싱 실패 (LoadTestResult는 정상 반환)", label, exc_info=True)
         return None
 
 
 def _to_float(value: Any, default: float | None = 0.0) -> float | None:
-    # 테스트 시간이 너무 짧거나 요청 수가 적으면 Locust가 'N/A'를 기록한다.
+    # 테스트 시간이 너무 짧거나 요청 수가 적으면 Locust가 'N/A'(CSV) 또는 None(종료 시 통계)을 기록한다.
     try:
         return float(value)
     except (ValueError, TypeError):
         return default
+
+
+def _read_final_stats(path: Path) -> dict[str, Any] | None:
+    """locustfile이 쓴 종료 시 통계. 파일이 없으면 None, 형식이 틀리면 예외."""
+    if not path.exists():
+        return None
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    if not isinstance(data, dict) or not isinstance(data.get("aggregated"), dict):
+        raise ValueError("종료 시 통계에 aggregated 항목이 없습니다.")
+
+    return data
+
+
+def _result_from_final_stats(data: dict[str, Any], duration: int) -> LoadTestResult:
+    """종료 시 통계의 Aggregated 값으로 LoadTestResult를 만든다 (_parse_stats_csv와 같은 규칙)."""
+    aggregated = data["aggregated"]
+    total_requests = int(aggregated["num_requests"])
+    failure_count = int(aggregated["num_failures"])
+
+    return LoadTestResult(
+        tps=_to_float(aggregated.get("total_rps")),
+        latency_p95=_to_float(aggregated.get("p95_response_time")),
+        latency_avg=_to_float(aggregated.get("avg_response_time")),
+        error_rate=(failure_count / total_requests) if total_requests > 0 else 0.0,
+        duration=duration,
+        total_requests=total_requests,
+    )
+
+
+def _endpoints_from_final_stats(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """종료 시 통계의 엔드포인트 항목을 _parse_endpoint_rows와 같은 모양으로 옮긴다."""
+    endpoints = []
+
+    for entry in data.get("entries") or []:
+        requests = int(entry["num_requests"])
+        failures = int(entry["num_failures"])
+
+        endpoints.append({
+            "name": entry["name"],
+            "method": entry.get("method") or None,
+            "requests": requests,
+            "failures": failures,
+            "error_rate": (failures / requests) if requests > 0 else None,
+            "p95_ms": _to_float(entry.get("p95_response_time"), None),
+            "avg_ms": _to_float(entry.get("avg_response_time"), None),
+            "rps": _to_float(entry.get("total_rps"), None),
+        })
+
+    return endpoints
 
 
 def _read_stats_rows(stats_path: Path) -> list[dict[str, str]]:
@@ -242,6 +341,7 @@ def _parse_stats_csv(stats_path: Path, duration: int) -> LoadTestResult:
     Locust의 stats CSV는 엔드포인트(Name)별 행 + 마지막에 모든 엔드포인트를
     합산한 "Aggregated" 행을 포함한다. InfraGuard Agent는 개별 엔드포인트가
     아니라 시스템 전체의 TPS/Latency를 진단하므로 Aggregated 행 하나만 사용한다.
+    종료 시 통계가 없을 때만 쓴다 (마지막 약 1초 누락 가능, #85).
     """
     rows = _read_stats_rows(stats_path)
 

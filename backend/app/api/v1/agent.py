@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 import time
 from typing import Any
 
@@ -247,6 +248,87 @@ task_manager = AgentTaskManager()
 
 
 # =================================================================
+# 🚦 동시 실행 방지 (docs/02 ISSUE-17)
+# 실행 중(승인 대기 포함)이거나, 연결이 끊긴 이전 실행의 부하 테스트(Locust)가 아직 돌고 있으면
+# 새 실행과 서버 수 초기화를 막는다. 겹친 부하가 측정을 오염시킨 사례: 2026-09-11 233316 R1 (docs/02 ISSUE-5).
+#
+# 끊긴 실행의 Locust는 강제로 끝내지 않고, 끝날 때까지 새 실행을 막는다.
+# - 부하 테스트는 asyncio.to_thread 안에서 Locust 서브프로세스를 실행한다. 스트림이 끊겨 코루틴이 취소돼도 스레드는 끝까지 돈다.
+# - run_load_test가 duration + 60초 타임아웃으로 프로세스를 끝내므로 기다리는 시간에 상한이 있다.
+# - 강제로 끝내려면 실행 중인 프로세스를 따로 추적해 다른 스레드에서 kill해야 한다. 결과 파싱·임시 디렉터리 정리와
+#   경합하고, 잘못된 프로세스를 끝낼 위험을 새로 만든다. 기다리는 쪽은 기존 부하 테스트 코드를 바꾸지 않는다.
+# =================================================================
+class LoadTestTracker:
+    """끝나지 않은 부하 테스트(Locust 실행 스레드)를 task_id별로 센다. 스레드에서 호출하므로 잠금을 쓴다."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[str, int] = {}
+
+    def enter(self, task_id: str) -> None:
+        with self._lock:
+            self._active[task_id] = self._active.get(task_id, 0) + 1
+
+    def exit(self, task_id: str) -> None:
+        with self._lock:
+            remaining = self._active.get(task_id, 0) - 1
+
+            if remaining > 0:
+                self._active[task_id] = remaining
+            else:
+                self._active.pop(task_id, None)
+
+    def active(self) -> list[str]:
+        with self._lock:
+            return list(self._active)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._active.clear()
+
+
+# 전역 부하 테스트 추적기
+load_tests = LoadTestTracker()
+
+# 초기화가 진행 중인지. 중복 요청은 409로 거부한다
+_replica_reset_in_progress = False
+
+# 새 실행을 막는 이유별 안내 문구 (409 detail, SSE 메시지, UI 표시)
+BUSY_MESSAGES = {
+    "agent_running": "다른 에이전트 실행이 진행 중입니다(승인 대기 포함). 끝난 뒤 다시 시작하세요.",
+    "load_test_running": "연결이 끊긴 이전 실행의 부하 테스트(Locust)가 아직 끝나지 않았습니다. 끝나면 다시 시작할 수 있습니다.",
+    "replica_reset": "서버 수 초기화가 진행 중입니다. 끝난 뒤 다시 시작하세요.",
+}
+
+
+def _busy_reason() -> str | None:
+    """
+    새 실행을 막아야 하는 이유. 없으면 None.
+
+    - agent_running: finalize되지 않은 기록기가 있다 (실행 중·승인 대기). 실행이 끝나는 모든 경로에서 finalize된다.
+    - load_test_running: 끝나지 않은 부하 테스트 스레드가 있다 (스트림이 끊긴 실행 포함).
+    - replica_reset: 서버 수 초기화 중이다.
+    """
+
+    if any(not recorder.finalized for recorder in run_records.values()):
+        return "agent_running"
+
+    if load_tests.active():
+        return "load_test_running"
+
+    if _replica_reset_in_progress:
+        return "replica_reset"
+
+    return None
+
+
+def _agent_busy() -> bool:
+    """에이전트 실행 또는 부하 테스트가 진행 중인지 (서버 수 초기화 차단용)."""
+
+    return _busy_reason() in ("agent_running", "load_test_running")
+
+
+# =================================================================
 # 📥 [POST] 프론트엔드가 승인/거절 누르면 때리는 엔드포인트
 # =================================================================
 class ApprovalRequest(BaseModel):
@@ -292,30 +374,21 @@ async def approve_task(req: ApprovalRequest):
 # 🔄 현재 서버 수 조회 · 1대 초기화 (측정 회차 사이 사람의 수동 조작)
 # 에이전트 실행이 아니므로 results/에 기록하지 않고 서버 로그만 남긴다.
 # =================================================================
-# 초기화가 진행 중인지. 중복 요청은 409로 거부한다
-_replica_reset_in_progress = False
-
-
-def _agent_busy() -> bool:
-    """
-    에이전트 실행이 진행 중인지 (승인 대기 포함).
-
-    실행마다 RunRecorder가 생기고 실행이 끝나는 모든 경로(스트림 종료 포함)에서 finalize되므로,
-    finalize되지 않은 기록기가 있으면 실행 중이다.
-    """
-
-    return any(not recorder.finalized for recorder in run_records.values())
-
-
 @router.get("/agent/replicas")
 async def get_replicas():
-    """현재 target-server replica 수(docker compose ps 실제 값). 조회 실패면 null."""
+    """
+    현재 target-server replica 수(docker compose ps 실제 값, 조회 실패면 null)와
+    새 실행을 시작할 수 없는지(busy)·그 이유(busy_reason)를 반환한다.
+    """
 
     replicas = await _read_replicas()
+    reason = _busy_reason()
 
     return {
         "replicas": replicas if replicas >= 1 else None,
-        "busy": _agent_busy() or _replica_reset_in_progress,
+        "busy": reason is not None,
+        # 새 실행을 막는 이유 (agent_running / load_test_running / replica_reset). 없으면 null
+        "busy_reason": reason,
     }
 
 
@@ -324,15 +397,18 @@ async def reset_replicas():
     """
     target-server를 1대로 되돌린다 (측정 회차 사이 초기화).
 
-    에이전트 실행 중·승인 대기 중이거나 다른 초기화가 진행 중이면 409로 거부한다.
+    에이전트 실행 중·승인 대기 중이거나, 끊긴 실행의 부하 테스트가 남아 있거나,
+    다른 초기화가 진행 중이면 409로 거부한다.
     UI 버튼 비활성화만이 아니라 API를 직접 호출해도 실행 중에는 서버 수가 바뀌지 않게 하기 위해서다.
     """
     global _replica_reset_in_progress
 
-    if _agent_busy():
+    reason = _busy_reason()
+
+    if reason in ("agent_running", "load_test_running"):
         raise HTTPException(
             status_code=409,
-            detail="에이전트 실행 중(승인 대기 포함)에는 서버 수를 초기화할 수 없습니다.",
+            detail=f"서버 수를 초기화할 수 없습니다. {BUSY_MESSAGES[reason]}",
         )
 
     if _replica_reset_in_progress:
@@ -495,7 +571,15 @@ async def start_agent(target_tps: int = 30, duration: int = 10, force_scaling: b
 
     .env에 DEBUG_ENDPOINTS_ENABLED=true가 없으면 force_scaling은 무시됩니다.
     인증 없이 실제 Docker 스케일링을 유발할 수 있는 기능이라 기본값은 꺼짐입니다.
+
+    동시 실행 방지 (docs/02 ISSUE-17): 다른 실행이 진행 중(승인 대기 포함)이거나, 연결이 끊긴 실행의
+    부하 테스트가 남아 있거나, 서버 수 초기화 중이면 409로 거부합니다.
     """
+    reason = _busy_reason()
+
+    if reason is not None:
+        raise HTTPException(status_code=409, detail=BUSY_MESSAGES[reason])
+
     return StreamingResponse(
         start_agent_stream(target_tps, duration, force_scaling),
         media_type="text/event-stream"
@@ -520,7 +604,17 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
     결과 패널 그래프 (docs/03 Phase 4): 부하 테스트 노드를 수집용 노드로 바꿔 넘긴다(engine의 load_test_node 인자).
     초 단위 시계열·엔드포인트 통계는 부하 테스트와 함께, 서버별 요청 수는 부하 뒤 백그라운드로 모은다.
     종료 SSE 직전에 늦게 오는 값을 최대 DETAILS_SETTLE_TIMEOUT_SEC 기다린다(_finalize).
+
+    동시 실행 방지 (docs/02 ISSUE-17): start_agent의 확인과 스트림 시작 사이에 다른 요청이 끼어든 경우를
+    여기서 한 번 더 막는다. 이 확인부터 기록기 등록까지는 await가 없어 이벤트 루프 안에서 한 번에 처리된다.
+    거부된 요청은 실행이 아니므로 결과 파일을 만들지 않는다.
     """
+
+    busy_reason = _busy_reason()
+
+    if busy_reason is not None:
+        yield _sse("failed", None, f"⛔ {BUSY_MESSAGES[busy_reason]}")
+        return
 
     # 1. AgentRuntimeState 데이터 초기화
     try:
@@ -555,7 +649,13 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         captured: dict[str, Any] = {}
 
         def _runner(**kwargs):
-            result, details = run_load_test_detailed(**kwargs)
+            # 이 스레드가 끝날 때까지(스트림이 끊겨도) 새 실행을 막는다 (동시 실행 방지, ISSUE-17)
+            load_tests.enter(task_id)
+            try:
+                result, details = run_load_test_detailed(**kwargs)
+            finally:
+                load_tests.exit(task_id)
+
             captured["result"] = result
             captured["details"] = details
             return result
@@ -788,4 +888,5 @@ async def start_agent_stream(target_tps: int = 30, duration: int = 10, force_sca
         # 정상 종료 경로는 이미 저장했다(finalize는 멱등). 종료 경로를 거치지 못한 실행
         # (승인 대기·진단 중 클라이언트 연결 종료로 스트림이 닫힌 경우 등)도 결과 파일로 남긴다.
         # 연결이 끊긴 경우라 늦게 오는 그래프 데이터는 기다리지 않는다.
+        # 이미 시작된 부하 테스트 스레드는 끝까지 돌고, 끝날 때까지 새 실행을 막는다 (load_tests, ISSUE-17).
         recorder.finalize(state, "stream_closed")
