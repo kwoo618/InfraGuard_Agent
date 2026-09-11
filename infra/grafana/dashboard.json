@@ -21,12 +21,6 @@
     },
     {
       "type": "panel",
-      "id": "gauge",
-      "name": "Gauge",
-      "version": ""
-    },
-    {
-      "type": "panel",
       "id": "stat",
       "name": "Stat",
       "version": ""
@@ -35,7 +29,7 @@
   "annotations": {
     "list": []
   },
-  "description": "InfraGuard Agent — target-server 핵심 메트릭 대시보드",
+  "description": "InfraGuard Agent — target-server 부하 중 실시간 상태 (서버 수, 활성 연결, TPS, P95, 에러율, 서버별 분산)",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -46,140 +40,12 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "id": 10,
-      "title": "🖥️ 컨테이너 리소스 (cAdvisor)",
+      "title": "현재 상태",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 60 },
-              { "color": "red", "value": 85 }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 1 },
-      "id": 1,
-      "options": {
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "title": "CPU 사용률 (%)",
-      "type": "gauge",
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "avg(rate(container_cpu_usage_seconds_total{name=~\"infraguard-target-server.*\"}[1m])) * 100",
-          "legendFormat": "CPU %",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 60 },
-              { "color": "red", "value": 85 }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 1 },
-      "id": 2,
-      "options": {
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "title": "메모리 사용률 (%)",
-      "type": "gauge",
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "avg(container_memory_usage_bytes{name=~\"infraguard-target-server.*\"} / container_spec_memory_limit_bytes{name=~\"infraguard-target-server.*\"}) * 100",
-          "legendFormat": "Memory %",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 3 },
-              { "color": "red", "value": 5 }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
-      "id": 3,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "title": "활성 Connection 수",
-      "type": "stat",
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(http_requests_in_progress) or vector(0)",
-          "legendFormat": "Connections",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Prometheus가 수집 중인 target-server replica 중 UP인 수. dns_sd 갱신(5초)과 scrape(5초) 때문에 스케일 후 최대 약 10초 늦게 반영된다.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -194,7 +60,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 1 },
       "id": 4,
       "options": {
         "colorMode": "background",
@@ -208,26 +74,69 @@
         },
         "textMode": "auto"
       },
-      "title": "실행 중인 Replica 수",
+      "title": "실행 중인 서버 수 (target-server replica)",
       "type": "stat",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "count(container_last_seen{name=~\"infraguard-target-server.*\"})",
-          "legendFormat": "Replicas",
+          "expr": "count(up{job=\"target-server\"} == 1)",
+          "legendFormat": "서버 수",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "전체 replica에서 처리 중이거나 처리를 기다리는 요청 수의 합(순간값). 에이전트 진단 입력 connection_count와 같은 쿼리다.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 1 },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "title": "활성 연결 수",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(http_requests_in_progress) or vector(0)",
+          "legendFormat": "활성 연결",
           "refId": "A"
         }
       ]
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
       "id": 11,
-      "title": "📈 요청 처리 현황 (시계열)",
+      "title": "요청 처리 현황",
       "type": "row"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "엔드포인트별 초당 요청 수. /health(Docker 헬스체크)·/metrics(Prometheus 수집)는 뺀다.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -256,7 +165,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "id": 5,
       "options": {
         "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
@@ -267,7 +176,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (handler) (rate(http_requests_total[1m]))",
+          "expr": "sum by (handler) (rate(http_requests_total{job=\"target-server\",handler!~\"/health|/metrics\"}[$__rate_interval]))",
           "legendFormat": "{{handler}}",
           "refId": "A"
         }
@@ -275,6 +184,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "서버 앱 안에서 잰 처리 시간(nginx·네트워크 제외)의 95번째 백분위. 히스토그램 버킷 사이를 선형보간하므로 Locust P95와 다를 수 있다. 30초를 넘으면 30000ms로 표시된다.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -303,7 +213,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "id": 6,
       "options": {
         "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
@@ -314,7 +224,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (handler, le) (rate(http_request_duration_seconds_bucket[1m]))) * 1000",
+          "expr": "histogram_quantile(0.95, sum by (handler, le) (rate(http_request_duration_seconds_bucket{job=\"target-server\",handler!~\"/health|/metrics\"}[$__rate_interval]))) * 1000",
           "legendFormat": "P95 {{handler}}",
           "refId": "A"
         }
@@ -322,6 +232,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "엔드포인트별 HTTP 5xx 비율. 에러가 없는 엔드포인트는 0으로 표시된다. /health·/metrics는 뺀다.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -350,7 +261,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "id": 7,
       "options": {
         "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
@@ -361,14 +272,15 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (handler) (rate(http_requests_total{status_code=~\"5..\"}[1m])) / sum by (handler) (rate(http_requests_total[1m]))",
-          "legendFormat": "Error rate {{handler}}",
+          "expr": "(sum by (handler) (rate(http_requests_total{job=\"target-server\",handler!~\"/health|/metrics\",status=\"5xx\"}[$__rate_interval])) or sum by (handler) (rate(http_requests_total{job=\"target-server\",handler!~\"/health|/metrics\"}[$__rate_interval])) * 0) / sum by (handler) (rate(http_requests_total{job=\"target-server\",handler!~\"/health|/metrics\"}[$__rate_interval]))",
+          "legendFormat": "에러율 {{handler}}",
           "refId": "A"
         }
       ]
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "replica(instance = 컨테이너 IP:8080)별 초당 요청 수. /health·/metrics는 뺀다. 스케일 후 새 replica가 요청을 받는지 확인한다.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -393,23 +305,23 @@
             "mode": "absolute",
             "steps": [{ "color": "green", "value": null }]
           },
-          "unit": "percent"
+          "unit": "reqps"
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
-      "id": 8,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 9,
       "options": {
         "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
-      "title": "CPU 사용률 추이 (%)",
+      "title": "서버별 요청 분산",
       "type": "timeseries",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "avg(rate(container_cpu_usage_seconds_total{name=~\"infraguard-target-server.*\"}[1m])) * 100",
-          "legendFormat": "CPU %",
+          "expr": "sum by (instance) (rate(http_requests_total{job=\"target-server\",handler!~\"/health|/metrics\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ]

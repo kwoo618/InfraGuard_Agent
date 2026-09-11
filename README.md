@@ -124,6 +124,10 @@ docker compose up -d --build    # target-server, nginx(LB), prometheus, grafana 
 > replica는 호스트 포트를 따로 받지 않는다. 개별 replica 상태는 Prometheus의 `instance` 라벨로 확인한다.
 >
 > 호스트 포트: `8000` 백엔드/UI · `8080` nginx(부하 대상) · `9090` Prometheus · `3000` Grafana · `8090` cAdvisor
+>
+> Grafana(`http://localhost:3000`)는 로그인 없이 **보기 전용**으로 열리고 InfraGuard 대시보드가 홈 화면으로 뜬다.
+> 데이터소스와 대시보드는 `infra/grafana/provisioning/`으로 자동 설정된다. 편집하려면 `admin` / `admin`으로 로그인한다
+> (대시보드 원본은 `infra/grafana/dashboard.json`이라 UI에서 고친 내용은 저장되지 않는다).
 
 ### 4. 백엔드 서버 실행
 
