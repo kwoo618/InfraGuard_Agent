@@ -37,7 +37,7 @@
         if (vm.diagnoses.length > 0) {
             const link = node('button', 'ig-linkbtn', 'AI 판단 근거 보기 ↓');
             link.type = 'button';
-            link.addEventListener('click', () => IGRefresh.scrollBelowToolbar(document.querySelector('.ra-judgement')));
+            link.addEventListener('click', () => IGRefresh.scrollBelowToolbar(document.querySelector('.ra-reasoning')));
             box.appendChild(link);
         }
         return box;
@@ -130,11 +130,11 @@
     // ---------------- AI 판단 근거 ----------------
 
     function diagnosisRow(item, vm) {
-        const row = node('div', 'ra-judge-row');
+        const row = node('div', 'ra-reason-row');
 
-        const head = node('div', 'ra-judge-head');
+        const head = node('div', 'ra-reason-head');
         head.append(
-            node('span', 'ra-judge-round', `측정 ${item.round ?? '-'} ${item.initial ? '진단' : '재진단'}`),
+            node('span', 'ra-reason-round', `측정 ${item.round ?? '-'} ${item.initial ? '진단' : '재진단'}`),
             node('span', `ra-conclusion tone-${item.conclusion.tone}`, item.conclusion.text),
             node('span', 'ra-kv-item', `심각도 ${item.severityText}`),
         );
@@ -167,10 +167,10 @@
     }
 
     function revalidationRow(item) {
-        const row = node('div', 'ra-judge-row');
-        const head = node('div', 'ra-judge-head');
+        const row = node('div', 'ra-reason-row');
+        const head = node('div', 'ra-reason-head');
         head.append(
-            node('span', 'ra-judge-round', `측정 ${item.round ?? '-'} 재검증`),
+            node('span', 'ra-reason-round', `측정 ${item.round ?? '-'} 재검증`),
             node('span', `ra-conclusion tone-${item.tone}`, item.verdict),
         );
         if (item.extra) head.appendChild(node('span', 'ra-kv-item', item.extra));
@@ -180,7 +180,7 @@
     }
 
     function judgement(vm) {
-        const section = node('section', 'ra-section ra-judgement');
+        const section = node('section', 'ra-section ra-reasoning');
         section.appendChild(sectionHead('AI 판단 근거'));
         // 처음 보는 사람 기준 용어 풀이 (진단 입력 측정값 = AI가 본 측정값)
         section.appendChild(IGRefresh.note(
@@ -194,7 +194,7 @@
             return section;
         }
 
-        const list = node('div', 'ra-judge');
+        const list = node('div', 'ra-reason');
         vm.timeline.forEach(item => list.appendChild(item.kind === 'diagnosis' ? diagnosisRow(item, vm) : revalidationRow(item)));
         section.appendChild(list);
         return section;

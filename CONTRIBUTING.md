@@ -177,14 +177,16 @@ refactor: AgentState dataclass 구조 개선
 class LoadTestResult:
     tps: float
     latency_p95: float   # ms
+    latency_avg: float   # ms
     error_rate: float    # 0.0 ~ 1.0
     duration: int        # 초
+    total_requests: int
 
 # tools/get_metrics → agent
 @dataclass
 class SystemMetrics:
-    cpu_pct: float
-    mem_pct: float
+    cpu_pct: float       # 수집하지 않는다 (0.0 고정, RESOURCE_METRICS_COLLECTED=False)
+    mem_pct: float       # 수집하지 않는다 (0.0 고정)
     connection_count: int
     timestamp: str
 
@@ -192,9 +194,10 @@ class SystemMetrics:
 @dataclass
 class BottleneckReport:
     cause: str
-    severity: str        # low | medium | high
+    severity: str             # low | medium | high
     recommendation: str
-    confidence: float    # 0.0 ~ 1.0
+    confidence: float         # 0.0 ~ 1.0
+    requires_scaling: bool = False   # HITL 승인 대상(스케일링 제안) 여부
 
 # tools/scale_service → api
 @dataclass
@@ -202,6 +205,7 @@ class ScalingResult:
     before_replicas: int
     after_replicas: int
     success: bool
+    error_message: str | None = None
 ```
 
 ---
