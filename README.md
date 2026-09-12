@@ -367,7 +367,7 @@ InfraGuard_Agent
 │       └── Dockerfile
 ├── tests
 │   ├── unit                       # test_load_runner / test_metrics / test_prompts / test_agent /
-│   │                              # test_api / test_run_history / test_replica_reset /
+│   │                              # test_api / test_scale / test_run_history / test_replica_reset /
 │   │                              # test_run_gate / test_grafana_config / test_saved_results
 │   └── integration
 │       └── test_e2e.py
