@@ -25,7 +25,8 @@ cp .env.example .env        # Windows: copy .env.example .env
 
 ## 방법 A — Docker 한 방 (권장)
 
-전체 스택(타겟 서버 · nginx 로드밸런서 · Prometheus · 백엔드 API/UI)을 컨테이너로 한 번에 띄운다.
+전체 스택(타겟 서버 · nginx 로드밸런서 · Prometheus · Grafana · cAdvisor · 백엔드 API/UI)을 컨테이너로 한 번에 띄운다.
+`--profile app`은 백엔드까지 포함한다는 뜻이고, 프로필이 없는 서비스(Grafana·cAdvisor 포함)는 이 명령에서 함께 뜬다.
 
 ```bash
 docker compose --profile app up -d --build

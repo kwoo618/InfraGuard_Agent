@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 프로젝트 개요
 
 **InfraGuard Agent** — Locust로 실제 부하를 직접 만들어 시스템 한계를 측정하고,
-AI 에이전트가 TPS·Latency 데이터를 해석해 스스로 인프라를 최적화하는 자율 진단 파이프라인.
+AI 에이전트가 TPS·Latency 데이터를 해석해 병목을 진단하고 스케일링을 제안하는 자율 진단 파이프라인.
+진단·측정은 사람 개입 없이 돌지만, **서버를 늘리는 실행은 사람이 승인한 뒤에만** 일어난다.
 
 사후 알림이 아닌 **사전 진단 + 자율 판단 + HITL 승인** 후 실행이 핵심 가치다.
 
@@ -19,7 +20,7 @@ Claude Code 응답 언어: 한국어
 | 팀원 | 역할 |
 |---|---|
 | 최강우 | 추가 개발 전체 (백엔드·에이전트·인프라·UI) |
-| 최소명 | PR 리뷰, 발표 자료 |
+| 최소명 | PR 변경 내용 공유(리뷰어 지정), 발표 자료 |
 
 > 파일별 소유권 규칙은 없다. 누구든 수정할 수 있으나, 인터페이스(schemas.py/state.py) 변경은 PR에 명시한다.
 
@@ -54,8 +55,9 @@ docker compose up -d
 
 # 개별 서비스 확인
 open http://localhost:8000   # FastAPI + UI
-open http://localhost:8089   # Locust 대시보드
+open http://localhost:8080   # nginx (부하 대상)
 open http://localhost:9090   # Prometheus
+# Locust 웹 대시보드는 없다 — run_load_test.py가 --headless 서브프로세스로 실행한다
 open http://localhost:3000   # Grafana
 ```
 
@@ -118,6 +120,7 @@ InfraGuard_Agent
 │   │   ├── test_prompts.py
 │   │   ├── test_agent.py
 │   │   ├── test_api.py
+│   │   ├── test_scale.py
 │   │   ├── test_run_history.py
 │   │   ├── test_replica_reset.py
 │   │   ├── test_run_gate.py       # 동시 실행 방지 (#87)
@@ -141,10 +144,11 @@ InfraGuard_Agent
 ### 핵심 데이터 흐름
 
 ```
-run_load_test    →  LoadTestResult(tps, latency_p95, error_rate, duration)
+run_load_test    →  LoadTestResult(tps, latency_p95, latency_avg, error_rate, duration, total_requests)
 get_metrics      →  SystemMetrics(cpu_pct, mem_pct, connection_count, timestamp)
-nodes.py(LLM)   →  BottleneckReport(cause, severity, recommendation, confidence)
-scale_service    →  ScalingResult(before_replicas, after_replicas, success)
+                    # cpu_pct·mem_pct는 수집하지 않는다 (0.0 고정, RESOURCE_METRICS_COLLECTED=False)
+nodes.py(LLM)   →  BottleneckReport(cause, severity, recommendation, confidence, requires_scaling)
+scale_service    →  ScalingResult(before_replicas, after_replicas, success, error_message)
 ```
 
 ### State 구조 (state.py)
@@ -204,13 +208,14 @@ class AgentRuntimeState(TypedDict):
 | GET | `/api/v1/agent/replicas` | 최강우 | 현재 target-server replica 수(docker compose 실제 값)와 실행 중 여부 `busy`, 이유 `busy_reason`(`agent_running` / `load_test_running` / `replica_reset`, #87) |
 | POST | `/api/v1/agent/replicas/reset` | 최강우 | 측정 회차 사이 1대 초기화. 에이전트 실행·승인 대기 중이거나 끝나지 않은 부하 테스트가 있으면 409. results/에 기록하지 않음 |
 | GET | `/api/v1/results/saved` | 최강우 | `docs/evidence/` 결과 파일 목록 (읽기 전용, 파일명 순, 읽지 못한 파일은 `error` 표시, #93) |
-| GET | `/api/v1/results/saved/{file_name}` | 최강우 | 결과 파일 하나를 `/report` 모양(`report`)과 파일 정보(`saved`)로 반환. 이름 규칙 불일치 400, evidence 밖·없는 파일 404 (#93) |
+| GET | `/api/v1/results/saved/{file_name}` | 최강우 | 결과 파일 하나를 `/report` 모양(`report`)과 파일 정보(`saved`)로 반환. 이름 규칙 불일치 400, evidence 밖·없는 파일 404, 읽지 못한 파일 422 (#93) |
 
 ## HITL(Human-In-The-Loop) 지점
 
 반드시 사람 승인을 받아야 하는 지점:
 
-1. **컨테이너 스케일링 실행 전** — `replica를 2→4로 늘리겠습니다. 실행할까요?`
+1. **컨테이너 스케일링 실행 전** — 승인 모달에 현재 서버 대수와 목표 대수, LLM이 만든 제안 문구가 표시된다
+   (문구는 `nodes.py`의 `final_answer` 템플릿에서 만든다. 측정하지 않은 예시 수치는 문서에 쓰지 않는다)
 2. **진단 결과 불확실 시** — LLM confidence < 0.6인 스케일링 제안은 승인 전 확인 게이트를 건다.
    경고와 "낮은 신뢰도를 확인했습니다" 체크 없이는 승인할 수 없고, `/approve`도 `acknowledge_low_confidence` 없이 승인하면 400이다.
    거절은 항상 가능하다 (#83, docs/02 ISSUE-13). 설계 초안의 "추가 정보 요청" 흐름은 구현하지 않았다.
@@ -220,17 +225,27 @@ HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병
 
 ## 가드레일
 
-- `MAX_LOOP = 10` — ReAct Loop 최대 반복 횟수. 초과 시 `agent_outcome = "failed"` 처리
-- Locust 부하 상한 **동시 가상 사용자 50** — 로컬 환경 CPU 고갈 방지. `run_load_test.py`가 target_tps를 Locust `--users`로 넘기고 `MAX_TPS = 50`으로 막는다 (`locust.conf`의 users 기본값도 50). 처리량(TPS) 상한이 아니다 — 스케일 후 실측 98.5 TPS (docs/02 ISSUE-11)
-- `scale_service` replica 최대 **8개**
-- 에이전트 루프 `asyncio.timeout(300)` — 5분 초과 시 강제 종료
-- 저신뢰 확인 게이트 기준 `LOW_CONFIDENCE_THRESHOLD = 0.6` — `backend/app/api/v1/agent.py` 코드 상수(환경변수 아님). 0.6 미만만 게이트 대상
+값의 출처를 둘로 나눠 적는다. **환경변수**는 `.env`로 덮어쓸 수 있고, **코드 상수**는 파일을 고쳐야 바뀐다.
+
+| 가드레일 | 값 | 출처 | 위치 |
+|---|---|---|---|
+| ReAct Loop 최대 반복 | 10 | 환경변수 `MAX_LOOP` (기본값 10) | `agent/nodes.py` |
+| Locust 동시 가상 사용자 상한 | 50 | **코드 상수** `MAX_TPS` | `tools/run_load_test.py` (`locust.conf`의 users 기본값도 50) |
+| replica 최대 | 8 | 환경변수 `SCALE_MAX_REPLICAS` (기본값 8) | `tools/scale_service.py` |
+| 에이전트 루프 타임아웃 | 300초 | **코드 상수** `ENGINE_TIMEOUT_SECONDS` | `agent/engine.py` |
+| 저신뢰 확인 게이트 기준 | 0.6 | **코드 상수** `LOW_CONFIDENCE_THRESHOLD` | `api/v1/agent.py` |
+| P95 SLO | 1000ms | 환경변수 `P95_SLO_MS` (기본값 1000) | `agent/prompts.py` |
+
+- 환경변수로 바뀔 수 있는 값(`MAX_LOOP`, `SCALE_MAX_REPLICAS`, `P95_SLO_MS`)은 **대회 기간에는 기본값으로 고정한다.**
+- 동시 가상 사용자 50은 로컬 PC의 CPU 고갈을 막기 위한 값이고, **처리량(TPS) 상한이 아니다**.
+  `run_load_test.py`가 target_tps를 Locust `--users`로 넘긴다. 실측 처리량은 `docs/04_발표용측정결과.md`를 본다 (docs/02 ISSUE-11).
+- `MAX_LOOP` 초과 시 `agent_outcome = "failed"` 처리, 저신뢰는 0.6 **미만**만 게이트 대상이다.
 
 ## LLM 설정
 
-- 모델: **Solar Pro** (Upstage)
+- 모델: Upstage **Solar** — 코드 기본값은 `solar-pro`, `.env.example`과 발표용 측정은 `solar-pro2` (`UPSTAGE_MODEL`로 지정)
 - Tool Use 방식: ReAct Loop (Thought → Action → Observation 반복)
-- 평가: **LLM-as-Judge** — 최종 병목 진단 리포트 정확성 정량 검증
+- 진단 품질의 정량 평가(LLM-as-Judge 등)는 **구현하지 않았다.** 진단 결과의 근거는 결과 파일의 LLM 원문과 측정값으로 확인한다
 
 ## 환경변수 (.env)
 
