@@ -230,15 +230,14 @@ HITL 없이 자율 실행 가능: 부하 테스트 실행, 메트릭 수집, 병
 
 - 모델: **Solar Pro** (Upstage)
 - Tool Use 방식: ReAct Loop (Thought → Action → Observation 반복)
-- 관측성: **Langfuse** 트레이싱 — 설계 목표. 2026-09-12 기준 코드 연동 없음 (`requirements.txt`·`.env.example`에만 있고 `backend/app`에서 쓰지 않는다, docs/02 ISSUE-18)
 - 평가: **LLM-as-Judge** — 최종 병목 진단 리포트 정확성 정량 검증
 
 ## 환경변수 (.env)
 
+> 전체 목록과 항목별 설명은 `.env.example`이 기준이다.
+
 ```bash
 UPSTAGE_API_KEY=        # Solar Pro API 키 (필수)
-LANGFUSE_SECRET_KEY=    # Langfuse 트레이싱 (선택)
-LANGFUSE_PUBLIC_KEY=
 PROMETHEUS_URL=http://localhost:9090
 MAX_LOOP=10
 TARGET_SERVER_URL=http://localhost:8080
