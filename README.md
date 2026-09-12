@@ -294,10 +294,10 @@ MAX_LOOP=10                               # ReAct Loop 최대 반복
 P95_SLO_MS=1000                           # P95 응답 시간 목표(ms). LLM 진단의 판단 기준
 SCALE_MAX_REPLICAS=8                      # 스케일 상한
 DEBUG_ENDPOINTS_ENABLED=false             # 디버그용 force_scaling 허용 여부. 측정·발표 시 반드시 false
-
-LANGFUSE_SECRET_KEY=                      # 예약됨 — 현재 코드에서 사용하지 않음 (docs/02 ISSUE-18)
-LANGFUSE_PUBLIC_KEY=
 ```
+
+항목별 설명과 "값을 비웠을 때 쓰이는 기본값"은 [.env.example](./.env.example)에 주석으로 적혀 있습니다.
+코드가 읽는 환경변수는 위 9개가 전부입니다.
 
 ---
 
