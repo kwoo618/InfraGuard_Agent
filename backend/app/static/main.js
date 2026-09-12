@@ -10,8 +10,11 @@ const lowConfidenceAck = document.getElementById('low-confidence-ack');
 const replicaCount = document.getElementById('replica-count');
 const resetReplicasBtn = document.getElementById('reset-replicas-btn');
 const busyNote = document.getElementById('busy-note');
+const logToggleBtn = document.getElementById('log-toggle-btn');
+const logContainer = document.getElementById('log-container');
 
-
+// 보기 전환 (#93, view_switch.js). 결과 패널 그리기와 백엔드 문구 표시(앞머리 이모지 제외)를 맡긴다
+const igView = window.InfraGuardView;
 
 const statusLabel = document.getElementById("agent-status");
 
@@ -55,7 +58,7 @@ function setupLowConfidenceGate(data) {
         const threshold = typeof data.low_confidence_threshold === 'number'
             ? `${Math.round(data.low_confidence_threshold * 100)}%`
             : '';
-        lowConfidenceText.textContent = `⚠ AI 신뢰도 ${confidence} — 기준 ${threshold} 미만`;
+        lowConfidenceText.textContent = `AI 신뢰도 ${confidence} — 기준 ${threshold} 미만`;
         lowConfidenceBox.classList.remove('hidden');
     } else {
         lowConfidenceText.textContent = '';
@@ -94,8 +97,11 @@ function syncControlButtons() {
 
     // 이 탭의 실행이 아닌 이유로 막혔으면 이유를 보여준다
     const showNote = serverBusy && !agentRunning && !replicaResetting;
-    busyNote.textContent = showNote ? `⛔ ${busyReasonText()}` : '';
+    busyNote.textContent = showNote ? busyReasonText() : '';
     busyNote.classList.toggle('hidden', !showNote);
+
+    // 실행 중에는 저장된 실행 기록을 불러오지 못하게 한다 (#93, saved_results.js)
+    if (window.SavedResults) SavedResults.setBlocked(blocked);
 }
 
 function setAgentRunning(running) {
@@ -223,7 +229,7 @@ function startLoadTestProgress(totalSeconds, sourceMessage) {
     const label = document.getElementById('progress-label');
     if (container) container.classList.remove('hidden');
     if (label) {
-        label.textContent = sourceMessage || `⚡ 부하 테스트 진행 중... (${loadTestDuration}초)`;
+        label.textContent = igView.plainText(sourceMessage || `부하 테스트 진행 중... (${loadTestDuration}초)`);
     }
     updateLoadTestProgressUI();
     loadTestTimer = setInterval(() => {
@@ -268,83 +274,93 @@ function parseLoadTestDurationSeconds(message) {
     return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
+/** 로그 한 줄: 시각 + 문구. 백엔드 문구의 앞머리 이모지는 표시할 때만 뗀다(메시지 판별은 원문으로 한다). */
 function appendLog(message, type = 'info') {
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
 
-    let icon = "ℹ";
+    const time = document.createElement('span');
+    time.className = 'log-time';
+    time.textContent = new Date().toLocaleTimeString();
 
-    switch (type) {
-        case "system":
-            icon = "⚙";
-            break;
-        case "success":
-            icon = "✅";
-            break;
-        case "warning":
-            icon = "⚠";
-            break;
-        case "error":
-            icon = "❌";
-            break;
-    }
-
-    const logEntry = document.createElement('div');
-
-    logEntry.className = `log-entry ${type}`;
-
-    logEntry.innerText =
-        `[${new Date().toLocaleTimeString()}] ${icon} ${message}`;
-
-    logWindow.appendChild(logEntry);
-
+    entry.append(time, document.createTextNode(igView.plainText(message)));
+    logWindow.appendChild(entry);
     logWindow.scrollTop = logWindow.scrollHeight;
 }
 
 
+// 에이전트 상태 문구
+const STATUS_TEXT = {
+    ready: '대기',
+    running: '실행 중',
+    waiting: '승인 대기',
+    scaling: '서버 늘리는 중',
+    completed: '완료',
+    error: '오류',
+};
 
-function updateStatus(text, cls) {
-
+/** cls: ready / running / waiting / scaling / completed / error. text를 주면 기본 문구 대신 쓴다(재측정 중). */
+function updateStatus(cls, text) {
     statusLabel.className = `status ${cls}`;
-    statusLabel.innerHTML = text;
+    statusLabel.textContent = text || STATUS_TEXT[cls] || '';
 
-    // 진행 중 상태(RUNNING·WAITING·SCALING)면 에이전트 실행 중으로 보고 시작·서버 초기화 버튼을 막는다.
-    // 끝난 상태(COMPLETED·ERROR)로 바뀌면 실제 서버 수와 busy 상태를 다시 읽는다.
+    // 진행 중 상태(running·waiting·scaling)면 에이전트 실행 중으로 보고 시작·서버 초기화 버튼을 막는다.
+    // 끝난 상태(completed·error)로 바뀌면 실제 서버 수와 busy 상태를 다시 읽는다.
     setAgentRunning(['running', 'waiting', 'scaling'].includes(cls));
-
 }
 
 
+// ---------------------------------------------------------------------
+// 진행 단계
+// ---------------------------------------------------------------------
+
+const STEP_STATES = ['active', 'done', 'skipped', 'stopped', 'failed'];
+
+function setStepState(id, state) {
+    const step = document.getElementById(id);
+    step.classList.remove(...STEP_STATES);
+    if (state) step.classList.add(state);
+}
+
 function activateStep(id) {
-
-    document.getElementById(id).classList.add("active");
-
+    setStepState(id, 'active');
 }
 
 function completeStep(id) {
-
-    const step = document.getElementById(id);
-
-    step.classList.remove("active");
-
-    step.classList.add("done");
-
+    setStepState(id, 'done');
 }
 
 function resetProgress() {
+    steps.forEach(id => setStepState(id, null));
+}
 
+function markActiveSteps(state) {
     steps.forEach(id => {
-
-        const step = document.getElementById(id);
-
-        step.classList.remove("active");
-        step.classList.remove("done");
-
+        if (document.getElementById(id).classList.contains('active')) setStepState(id, state);
     });
+}
 
+// 실행이 끝났을 때 결과(end_reason)별 진행 단계. 스케일링을 제안하지 않은 실행은 계획·승인·스케일링을 "건너뜀"으로,
+// 거절은 승인 단계를 "거절"로 둔다. (예전에는 AI 분석이 진행 중인 채로 스케일링·리포트만 완료로 남았다)
+const TIMELINE_OUTCOME = {
+    scaled: { load: 'done', metric: 'done', ai: 'done', plan: 'done', approval: 'done', scale: 'done', report: 'done' },
+    no_further_scaling: { load: 'done', metric: 'done', ai: 'done', plan: 'done', approval: 'done', scale: 'done', report: 'done' },
+    no_scaling_proposed: { load: 'done', metric: 'done', ai: 'done', plan: 'skipped', approval: 'skipped', scale: 'skipped', report: 'done' },
+    rejected: { load: 'done', metric: 'done', ai: 'done', plan: 'done', approval: 'stopped', scale: 'skipped', report: 'done' },
+};
+
+/** 결과 리포트를 받은 뒤 진행 단계를 정리한다. 실패·연결 종료는 진행 중이던 단계를 "실패"로 둔다. */
+function finishTimeline(endReason) {
+    const outcome = TIMELINE_OUTCOME[endReason];
+    if (!outcome) {
+        markActiveSteps('failed');
+        return;
+    }
+    Object.entries(outcome).forEach(([key, state]) => setStepState(`step-${key}`, state));
 }
 
 
-// /agent/report/{task_id} 조회 → 여태까지의 측정값(measurement)과
-// 실제로 취해진 조치(action)를 로그창에 정리해서 보여준다.
+// /agent/report/{task_id} 조회 → 결과 패널을 그리고 진행 단계를 결과에 맞게 정리한다.
 async function fetchReport(taskId) {
 
     try {
@@ -357,60 +373,20 @@ async function fetchReport(taskId) {
         }
 
         const report = await response.json();
+        finishTimeline(report.end_reason);
 
-        if (report.bottleneck) {
-            appendLog(
-                `🧠 병목 진단 — ${report.bottleneck.cause} (심각도: ${report.bottleneck.severity} / 신뢰도: ${(report.bottleneck.confidence * 100).toFixed(0)}%)`,
-                'info'
-            );
-            appendLog(`💡 권장 조치 — ${report.bottleneck.recommendation}`, 'info');
+        // 조회하는 사이 저장된 실행 기록을 불러왔으면 그 화면을 덮지 않는다 (#93)
+        if (window.SavedResults && SavedResults.isActive()) {
+            return;
         }
 
-        if (report.measurement) {
-            appendLog(
-                `📊 측정값 — TPS: ${report.measurement.tps.toFixed(1)} / P95: ${report.measurement.latency_p95.toFixed(0)}ms / 에러율: ${(report.measurement.error_rate * 100).toFixed(1)}%`,
-                'info'
-            );
-        }
-
-        if (report.measurement_after) {
-            appendLog(
-                `📈 재검증 — TPS: ${report.measurement_after.tps.toFixed(1)} / P95: ${report.measurement_after.latency_p95.toFixed(0)}ms / 에러율: ${(report.measurement_after.error_rate * 100).toFixed(1)}%`,
-                'info'
-            );
-        }
-
-        if (report.improvement) {
-            const latencyDelta = report.improvement.latency_p95_delta;
-            const tpsDelta = report.improvement.tps_delta;
-            const improved = latencyDelta < 0;   // P95가 줄었으면 개선
-            appendLog(
-                `${improved ? '✨' : '⚠️'} 개선 결과 — TPS ${tpsDelta >= 0 ? '+' : ''}${tpsDelta.toFixed(1)}, P95 ${latencyDelta >= 0 ? '+' : ''}${latencyDelta.toFixed(0)}ms`,
-                improved ? 'success' : 'warning'
-            );
-        }
-
-        if (report.action) {
-            const actionType = report.action.success ? 'success' : 'error';
-            const actionMsg = report.action.success
-                ? `🔧 조치 — Scale-out 완료 (${report.action.before_replicas} → ${report.action.after_replicas})`
-                : `🔧 조치 실패 — ${report.action.error_message}`;
-            appendLog(actionMsg, actionType);
-        }
-
-        if (report.optimization_plan && report.optimization_plan.length > 0) {
-            appendLog('📋 최적화 조치 목록', 'info');
-            report.optimization_plan.forEach((item, idx) => {
-                appendLog(`  ${idx + 1}. ${item}`, 'info');
-            });
-        }
-
-        // 결과 패널 (Phase 4, #75, result_panel.js). 위의 로그 출력은 그대로 두고 패널을 추가로 그린다.
+        // 결과 패널 (Phase 4 #75, #93): 현재 보기의 렌더러가 그린다
         try {
-            renderResultPanel(report);
+            igView.showReport(report, { source: 'live' });
         } catch (panelError) {
             console.error('[result-panel] 렌더링 실패:', panelError);
-            appendLog("결과 패널을 표시하지 못했습니다. (로그의 결과는 위와 같습니다)", "error");
+            const file = report.result_file ? ` 결과 파일: ${report.result_file}` : '';
+            appendLog(`결과 패널을 표시하지 못했습니다.${file}`, "error");
         }
 
     } catch (error) {
@@ -432,15 +408,17 @@ startBtn.addEventListener('click', async () => {
         return;
     }
 
-    logWindow.innerHTML = "";
+    logWindow.replaceChildren();
 
     resetProgress();
     resetLoadTestProgress();
-    resetResultPanel();
+    // 저장된 실행 기록을 보고 있었으면 끝내고 실시간 실행으로 돌아간다 (#93)
+    if (window.SavedResults) SavedResults.exit({ quiet: true });
+    igView.clearReport();
 
     appendLog('자율 진단 시스템 가동 요청 중...', 'system');
 
-    updateStatus("🔵 RUNNING", "running");
+    updateStatus('running');
 
     activateStep("step-load");
 
@@ -523,7 +501,8 @@ startBtn.addEventListener('click', async () => {
             hideLoadTestProgress();
 
             appendLog(data.message, 'error');
-            updateStatus("🔴 ERROR", "error");
+            markActiveSteps('failed');
+            updateStatus('error');
             eventSource.close();
             startBtn.disabled = false;
         }
@@ -531,16 +510,15 @@ startBtn.addEventListener('click', async () => {
         else if (data.status === 'need_approval') {
             appendLog(data.message, 'warning');
             currentTaskId = data.task_id;
-            modalMessage.innerText = data.message;
+            modalMessage.textContent = igView.plainText(data.message);
             setupLowConfidenceGate(data);
             if (pendingLowConfidence) {
                 appendLog(`${lowConfidenceText.textContent} — 승인하려면 낮은 신뢰도 확인이 필요합니다.`, 'warning');
             }
             completeStep("step-ai");
-            activateStep("step-plan");
             completeStep("step-plan");
             activateStep("step-approval");
-            updateStatus("🟠 WAITING APPROVAL", "waiting");
+            updateStatus('waiting');
             approvalModal.classList.remove("hidden");
             // 승인 대기 중에도 서버가 결과를 이어서 보내줘야 하므로 연결을 끊지 않는다.
         }
@@ -550,22 +528,21 @@ startBtn.addEventListener('click', async () => {
             appendLog(data.message, 'info');
             completeStep("step-approval");
             activateStep("step-scale");
-            updateStatus("🟣 SCALING", "scaling");
+            updateStatus('scaling');
         }
 
         // 스케일링 후 동일 조건으로 재측정 중
         else if (data.status === 'remeasuring') {
             appendLog(data.message, 'info');
-            updateStatus("🟣 RE-MEASURING", "scaling");
+            updateStatus('scaling', '재측정 중');
         }
 
-        // scale_service 결과 success=True → 최종 완료
+        // 실행 완료 (스케일링 완료, 미제안, 재진단 후 추가 미제안). 진행 단계는 리포트의 end_reason으로 정리한다
         else if (data.status === 'done') {
             appendLog(data.message, 'success');
-            completeStep("step-scale");
-            activateStep("step-report");
+            markActiveSteps('done');
             completeStep("step-report");
-            updateStatus("🟢 COMPLETED", "completed");
+            updateStatus('completed');
             startBtn.disabled = false;
             eventSource.close();
             fetchReport(data.task_id);
@@ -577,7 +554,8 @@ startBtn.addEventListener('click', async () => {
             hideLoadTestProgress();
 
             appendLog(data.message, 'error');
-            updateStatus("🔴 ERROR", "error");
+            markActiveSteps('failed');
+            updateStatus('error');
             approvalModal.classList.add("hidden");
             startBtn.disabled = false;
             eventSource.close();
@@ -594,11 +572,13 @@ startBtn.addEventListener('click', async () => {
             // 첫 이벤트도 받기 전에 끊겼다: 서버가 새 실행을 거부했거나(409, 동시 실행 방지) 서버에 연결할 수 없다.
             // EventSource는 응답 본문을 읽을 수 없어서 이유는 busy 상태를 다시 읽어 표시한다.
             appendLog("실행을 시작하지 못했습니다. 다른 실행이 진행 중이거나 서버에 연결할 수 없습니다.", "error");
-            updateStatus("🔴 ERROR", "error");
+            markActiveSteps('failed');
+            updateStatus('error');
         } else if (eventSource.readyState !== EventSource.CLOSED) {
             // 백엔드가 정상적으로 close()한 게 아니라, 진짜 도커가 꺼져서 통신이 터진 경우
-            appendLog("[에러] 도커 인프라가 꺼져 있거나 응답이 없습니다! docker compose up -d를 확인하세요.", "error");
-            updateStatus("🔴 ERROR", "error");
+            appendLog("도커 인프라가 꺼져 있거나 응답이 없습니다. docker compose up -d를 확인하세요.", "error");
+            markActiveSteps('failed');
+            updateStatus('error');
         } else {
             appendLog("스트리밍 연결 종료.", "system");
         }
@@ -667,7 +647,7 @@ approveBtn.addEventListener('click', async () => {
 
         appendLog("승인 요청 실패", "error");
 
-        updateStatus("🔴 ERROR", "error");
+        updateStatus('error');
 
         startBtn.disabled = false;
 
@@ -723,7 +703,7 @@ rejectBtn.addEventListener('click', async () => {
 
         appendLog("거절 요청 실패", "error");
 
-        updateStatus("🔴 ERROR", "error");
+        updateStatus('error');
 
         startBtn.disabled = false;
     }
@@ -734,3 +714,60 @@ rejectBtn.addEventListener('click', async () => {
     }
 
 });
+
+
+
+// =================================================================
+// 보기 전환 · 저장된 실행 기록 (#93)
+// =================================================================
+
+// 로그 접기: 기본 보기는 결과가 나오면 기본 접힘, 상세 보기는 기본 펼침 (로그와 결과 패널 중복 정리).
+// 사용자가 버튼으로 바꾸면 다음 결과가 나올 때까지 그 선택을 따른다.
+let logExpandedByUser = null;   // null: 보기 기본값, true: 펼침, false: 접힘
+
+function logCollapsedByDefault() {
+    return igView.getView() === 'simple' && Boolean(igView.shownReport());
+}
+
+function syncLogToggle() {
+    const collapsed = logExpandedByUser === null ? logCollapsedByDefault() : !logExpandedByUser;
+    logContainer.classList.toggle('log-collapsed', collapsed);
+    logToggleBtn.textContent = collapsed ? '로그 보기' : '로그 접기';
+    logToggleBtn.setAttribute('aria-expanded', String(!collapsed));
+}
+
+logToggleBtn.addEventListener('click', () => {
+    logExpandedByUser = logContainer.classList.contains('log-collapsed');
+    syncLogToggle();
+});
+
+igView.onChange(reason => {
+    if (reason === 'report') logExpandedByUser = null;
+    syncLogToggle();
+});
+
+syncLogToggle();
+
+function idleLogEntry() {
+    // index.html 처음 상태와 같은 한 줄
+    const entry = document.createElement('div');
+    entry.className = 'log-entry system';
+    entry.textContent = '시스템 대기 중...';
+    return entry;
+}
+
+/** 저장된 실행 기록을 보여 주기 전에 실시간 실행의 흔적(로그·진행 표시)을 비운다 (saved_results.js가 부른다). */
+function enterSavedView() {
+    resetProgress();
+    resetLoadTestProgress();
+    approvalModal.classList.add('hidden');
+    updateStatus('ready');
+    logWindow.replaceChildren();
+    appendLog('저장된 실행 기록을 표시 중입니다. 실시간 로그는 없습니다.', 'system');
+}
+
+/** 저장된 실행 기록 보기를 끝내고 처음 상태로 돌아간다 (saved_results.js가 부른다). */
+function leaveSavedView() {
+    igView.clearReport();
+    logWindow.replaceChildren(idleLogEntry());
+}

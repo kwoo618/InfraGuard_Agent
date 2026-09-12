@@ -1,0 +1,184 @@
+/*
+ * 상단 도구 막대 — 기본 보기 / 상세 보기 전환 · 저장된 실행 기록 불러오기 (#93).
+ * 두 보기에서 항상 켜진다. 색은 보기별 스타일 시트(c.css / a.css)가 --ig-tb-* 변수로 정한다.
+ */
+
+.hidden {
+    display: none !important;
+}
+
+.ig-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 20px;
+    padding: 10px 12px;
+    background: var(--ig-tb-bg, #0d1117);
+    border: 1px solid var(--ig-tb-border, #30363d);
+    border-radius: var(--ig-tb-radius, 8px);
+    color: var(--ig-tb-text, #c9d1d9);
+    font-family: var(--ig-font, 'Segoe UI', sans-serif);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.ig-toolbar-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 18px;
+}
+
+.ig-toolbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.ig-saved-group {
+    flex: 1 1 340px;
+}
+
+.ig-toolbar-label {
+    color: var(--ig-tb-muted, #8b949e);
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 2px;
+}
+
+.ig-toolbar button,
+.ig-toolbar select {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--ig-tb-text, #c9d1d9);
+    background: var(--ig-tb-control, #161b22);
+    border: 1px solid var(--ig-tb-border, #30363d);
+    border-radius: 6px;
+    padding: 5px 10px;
+    transition: none;
+    transform: none;
+}
+
+.ig-toolbar select {
+    flex: 1 1 220px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.ig-toolbar button {
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* 기본 보기 / 상세 보기: 붙어 있는 두 칸짜리 토글 */
+.ig-view-toggle {
+    gap: 0;
+}
+
+.ig-view-toggle button {
+    border-radius: 0;
+}
+
+.ig-view-toggle button:first-child {
+    border-radius: 6px 0 0 6px;
+}
+
+.ig-view-toggle button:last-child {
+    margin-left: -1px;
+    border-radius: 0 6px 6px 0;
+}
+
+.ig-toolbar button:hover,
+.ig-toolbar button:active {
+    transform: none;
+    background: var(--ig-tb-control-hover, #21262d);
+}
+
+.ig-toolbar button[aria-pressed="true"] {
+    color: var(--ig-tb-pressed-text, #0d1117);
+    background: var(--ig-tb-pressed-bg, #c9d1d9);
+    border-color: var(--ig-tb-pressed-bg, #c9d1d9);
+}
+
+.ig-toolbar button:disabled,
+.ig-toolbar select:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.ig-toolbar button:focus-visible,
+.ig-toolbar select:focus-visible {
+    outline: 2px solid var(--ig-tb-focus, #58a6ff);
+    outline-offset: 1px;
+}
+
+/* 저장된 실행 기록 표시줄: 실시간 실행과 헷갈리지 않게 불러온 동안 항상 보인다 */
+.ig-saved-banner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    color: var(--ig-tb-banner-text, #f0d58c);
+    background: var(--ig-tb-banner-bg, rgba(227, 179, 65, .12));
+    border: 1px solid var(--ig-tb-banner-border, #9e7a1f);
+    font-weight: 600;
+}
+
+.ig-saved-banner-text {
+    flex: 1 1 240px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.ig-saved-error {
+    color: var(--ig-tb-error, #ff7b72);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+/* 좁은 화면: 붙어 있는 막대가 화면을 덜 가리도록 라벨을 숨기고 줄인다 (저장된 실행 기록 표시줄은 그대로 보인다) */
+@media (max-width: 640px) {
+    .ig-toolbar {
+        gap: 6px;
+        margin-bottom: 14px;
+        padding: 8px;
+        font-size: 12px;
+    }
+
+    .ig-toolbar-row {
+        gap: 6px;
+    }
+
+    .ig-toolbar-label {
+        display: none;
+    }
+
+    .ig-toolbar button,
+    .ig-toolbar select {
+        padding: 4px 8px;
+        font-size: 12px;
+    }
+
+    .ig-saved-group {
+        flex: 1 1 100%;
+        flex-wrap: nowrap;
+    }
+
+    .ig-toolbar select {
+        flex: 1 1 auto;
+    }
+
+    .ig-saved-banner {
+        padding: 6px 8px;
+        font-size: 12px;
+    }
+}
