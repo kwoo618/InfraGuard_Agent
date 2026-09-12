@@ -1,0 +1,466 @@
+/*
+ * 기본 보기 (C 미니멀형, 디자인 개편 #93)
+ *
+ * 상세 보기(A)와 같은 어두운 톤을 쓴다 (토글할 때 화면 밝기가 튀지 않게 배경·글자색을 A와 맞춘다).
+ * 구성은 그대로다: 여백을 넉넉히 두고 큰 숫자 하나를 중심으로 한눈에 보이게 한다.
+ * 측정 회차 색(--ig-round-ramp)은 dataviz 검증 스크립트로 확인한 한 색상 명도 단계다 (어두운 면 #181b1f, ordinal 전 항목 PASS).
+ * 어두운 면 대비: 본문 10.9:1, 보조 6.8:1, 흐린 글자 4.6:1, SLO 기준선 9.6:1 (격자선은 의도적으로 약하게 둔다).
+ */
+
+:root {
+    color-scheme: dark;
+
+    --ig-font: system-ui, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    --ig-mono: Consolas, "Cascadia Mono", "Malgun Gothic", monospace;
+
+    --ig-page: #111217;
+    --ig-surface: #181b1f;
+    --ig-surface-2: #22252b;
+    --ig-chart-surface: #181b1f;
+    --ig-border: #2c3039;
+    --ig-border-strong: #3a3f4a;
+
+    --ig-text-strong: #e8e9ee;
+    --ig-text: #ccccdc;
+    --ig-text-muted: #a0a2b0;
+    --ig-text-faint: #7f8390;
+    --ig-link: #7aa7ff;
+
+    --ig-accent: #3565c9;
+    --ig-accent-hover: #3f71d6;
+    --ig-accent-contrast: #ffffff;
+    --ig-accent-wash: rgba(53, 101, 201, .28);
+
+    --ig-good: #0ca30c;
+    --ig-bad: #d03b3b;
+    --ig-boundary: #fab219;
+    --ig-good-text: #45c945;
+    --ig-bad-text: #f28383;
+    --ig-warn-text: #f5c14f;
+    --ig-bad-wash: rgba(208, 59, 59, .14);
+
+    --ig-track: #2c3039;
+    --ig-input-bg: #111217;
+    --ig-log-bg: #0c0d11;
+    --ig-log-text: #b9bdcc;
+
+    --ig-grid: #262a31;
+    --ig-axis: #3a3f4a;
+    --ig-ref: #c3c2b7;
+    --ig-ref-text: #d8d9e0;
+    --ig-incomplete: rgba(255, 255, 255, .045);
+    --ig-zone: #1e2229;
+    --ig-tip-bg: #22252b;
+    --ig-tip-text: #e8e9ee;
+    --ig-tip-muted: #a0a2b0;
+
+    --ig-round-ramp: #256abf, #3987e5, #6da7ec, #9ec5f4, #cde2fb;
+    --ig-single: #3987e5;
+
+    --ig-radius: 10px;
+    --ig-radius-sm: 6px;
+    --ig-container-max: 980px;
+    --ig-h1-size: 20px;
+    --ig-chart-pad: 4px 0 0;
+
+    --ig-tb-bg: #181b1f;
+    --ig-tb-border: #2c3039;
+    --ig-tb-text: #ccccdc;
+    --ig-tb-muted: #8e909e;
+    --ig-tb-control: #111217;
+    --ig-tb-control-hover: #22252b;
+    --ig-tb-pressed-bg: #ccccdc;
+    --ig-tb-pressed-text: #111217;
+    --ig-tb-banner-bg: rgba(250, 178, 25, .10);
+    --ig-tb-banner-border: #7d6320;
+    --ig-tb-banner-text: #f5c14f;
+    --ig-tb-focus: #7aa7ff;
+    --ig-tb-error: #f28383;
+    --ig-tb-radius: 10px;
+}
+
+a {
+    text-underline-offset: 3px;
+}
+
+/* ---------------- 결과 패널 ---------------- */
+
+.rc {
+    padding: 32px 40px 24px;
+    background: var(--ig-surface);
+    border: 1px solid var(--ig-border);
+    border-radius: var(--ig-radius);
+}
+
+/* 결론 한 줄 */
+.rc-head {
+    display: grid;
+    gap: 6px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--ig-border);
+}
+
+.rc-headline {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 21px;
+    font-weight: 700;
+    line-height: 1.45;
+    letter-spacing: -0.01em;
+    color: var(--ig-text-strong);
+    word-break: keep-all;
+}
+
+.rc-headline .ig-dot {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    margin: 0;
+    transform: translateY(-2px);
+}
+
+.rc-state-good .ig-dot { background: var(--ig-good); }
+.rc-state-bad .ig-dot { background: var(--ig-bad); }
+.rc-state-boundary .ig-dot,
+.rc-state-warn .ig-dot { background: var(--ig-boundary); }
+
+.rc-head .ig-linkbtn {
+    justify-self: start;
+}
+
+.rc-error {
+    font-size: 13.5px;
+    color: var(--ig-bad-text);
+    overflow-wrap: anywhere;
+}
+
+/* P95 큰 숫자 (비례폭 숫자, dataviz hero figure) */
+.rc-hero-block {
+    padding-top: 20px;
+}
+
+.rc-kicker {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ig-text-muted);
+}
+
+.rc-hero {
+    margin-top: 6px;
+    font-size: 48px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+    color: var(--ig-text-strong);
+}
+
+/* 측정값이 없으면 큰 숫자 자리에 글자를 작게 */
+.rc-hero-empty {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: 0;
+    color: var(--ig-text-muted);
+}
+
+.rc-from,
+.rc-arrow {
+    font-weight: 500;
+    color: var(--ig-text-faint);
+}
+
+.rc-slo {
+    margin-top: 10px;
+    font-size: 15px;
+    color: var(--ig-text-strong);
+}
+
+/* 측정 조건 (접지 않는다 — 결과를 이해하는 데 필요) */
+.rc-conditions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--ig-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.rc-conditions b {
+    font-weight: 600;
+    color: var(--ig-text);
+}
+
+/* 서버 흐름 그림: 측정 → (AI 제안·결정) → 측정 … */
+.rc-flow {
+    margin-top: 28px;
+}
+
+.rc-flow-track {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 0;
+    margin-top: 10px;
+}
+
+.rc-node {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    min-width: 96px;
+    padding: 12px 14px;
+    background: var(--ig-page);
+    border: 1px solid var(--ig-border);
+    border-radius: var(--ig-radius-sm);
+}
+
+.rc-servers {
+    display: grid;
+    grid-template-columns: repeat(4, 12px);
+    gap: 3px;
+    min-height: 12px;
+}
+
+.rc-servers i {
+    display: block;
+    width: 12px;
+    height: 12px;
+    background: var(--ig-single);
+    border-radius: 2px;
+}
+
+.rc-node-label {
+    font-size: 12.5px;
+    color: var(--ig-text-muted);
+}
+
+.rc-node-p95 {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--ig-text-strong);
+    font-variant-numeric: tabular-nums;
+}
+
+.rc-link,
+.rc-end {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    min-width: 108px;
+    padding: 18px 8px 0;
+    font-size: 12px;
+    text-align: center;
+    color: var(--ig-text-muted);
+}
+
+/* 화살표 선 */
+.rc-link::before {
+    content: "";
+    position: absolute;
+    top: 10px;
+    left: 8px;
+    right: 14px;
+    border-top: 1.5px solid var(--ig-border-strong);
+}
+
+.rc-link::after {
+    content: "";
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    border: 5px solid transparent;
+    border-left: 7px solid var(--ig-border-strong);
+}
+
+/* 끝 표시: 점선 + 글자 */
+.rc-end::before {
+    content: "";
+    position: absolute;
+    top: 10px;
+    left: 8px;
+    width: 28px;
+    border-top: 1.5px dashed var(--ig-border-strong);
+}
+
+.rc-end {
+    justify-content: flex-start;
+    padding-left: 44px;
+    padding-top: 3px;
+    min-width: 0;
+    font-weight: 600;
+}
+
+/* 그래프 2개 */
+.rc-charts {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    gap: 20px;
+    margin-top: 26px;
+}
+
+.rc-charts-single {
+    grid-template-columns: 1fr;
+}
+
+.rc-zone {
+    fill: var(--ig-zone);
+}
+
+.rc-segment {
+    stroke: var(--ig-text-strong);
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.rc-connector {
+    stroke: var(--ig-border-strong);
+    stroke-width: 1.5;
+}
+
+.rc-marker {
+    stroke: var(--ig-chart-surface);
+    stroke-width: 2;
+}
+
+/* 지표 4개 */
+.rc-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px solid var(--ig-border);
+}
+
+.rc-stat-l {
+    font-size: 13px;
+    color: var(--ig-text-muted);
+}
+
+.rc-stat-v {
+    margin-top: 4px;
+    font-size: 21px;
+    font-weight: 600;
+    color: var(--ig-text-strong);
+}
+
+.rc-stat-d {
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--ig-text-muted);
+}
+
+/* 접힘 (AI가 이렇게 판단한 이유 · 기술 정보) */
+.rc-fold {
+    margin-top: 22px;
+    border-top: 1px solid var(--ig-border);
+}
+
+.rc-fold + .rc-fold {
+    margin-top: 0;
+}
+
+.rc-fold > summary {
+    padding: 14px 0;
+    font-size: 14.5px;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--ig-text-strong);
+}
+
+.rc-fold-body {
+    display: grid;
+    gap: 8px;
+    padding: 0 0 16px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--ig-text);
+}
+
+.rc-reason-line {
+    font-variant-numeric: tabular-nums;
+}
+
+.rc-reason-meta {
+    color: var(--ig-text-muted);
+}
+
+.rc-quote {
+    margin: 0 0 6px;
+    padding: 2px 0 2px 12px;
+    font-size: 13.5px;
+    color: var(--ig-text-muted);
+    border-left: 2px solid var(--ig-border-strong);
+    overflow-wrap: anywhere;
+}
+
+.rc-quote-src {
+    font-size: 12px;
+    color: var(--ig-text-faint);
+}
+
+.rc-fold-body .ig-linkbtn {
+    justify-self: start;
+}
+
+/* 상세 보기 · Grafana */
+.rc-links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--ig-border);
+}
+
+.rc-more {
+    padding: 8px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ig-accent-contrast);
+    background: var(--ig-accent);
+    border: 1px solid var(--ig-accent);
+    border-radius: var(--ig-radius-sm);
+}
+
+.rc-more:hover {
+    background: var(--ig-accent-hover);
+}
+
+.rc-links .ig-grafana {
+    color: var(--ig-link);
+}
+
+@media (max-width: 760px) {
+    .rc-charts {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .rc {
+        padding: 20px 16px 16px;
+    }
+
+    .rc-headline {
+        font-size: 18px;
+    }
+
+    .rc-hero {
+        font-size: 34px;
+    }
+
+    .rc-node {
+        min-width: 84px;
+        padding: 10px;
+    }
+
+    .rc-link {
+        min-width: 84px;
+    }
+
+    .rc-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

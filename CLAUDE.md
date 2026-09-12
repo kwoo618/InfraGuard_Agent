@@ -44,6 +44,7 @@ pytest tests/unit/test_run_history.py -v
 pytest tests/unit/test_replica_reset.py -v
 pytest tests/unit/test_run_gate.py -v
 pytest tests/unit/test_grafana_config.py -v
+pytest tests/unit/test_saved_results.py -v
 
 # FastAPI 백엔드 서버 실행
 cd backend && uvicorn app.main:app --reload --port 8000
@@ -77,13 +78,19 @@ InfraGuard_Agent
 │   │   ├── api
 │   │   │   └── v1
 │   │   │       ├── agent.py       # /start /approve /report /replicas
-│   │   │       └── run_history.py # 라운드별 측정 이력·그래프 데이터 + results/ 결과 파일 저장
+│   │   │       ├── run_history.py # 라운드별 측정 이력·그래프 데이터 + results/ 결과 파일 저장
+│   │   │       └── saved_results.py # 저장된 결과 파일(docs/evidence) 읽기 전용 조회 + /report 모양 변환 (#93)
 │   │   ├── static                 # SSE UI + HITL 버튼 + 결과 패널
 │   │   │   ├── index.html
 │   │   │   ├── main.js
-│   │   │   ├── result_panel.js    # 결과 패널 (요약 배너, AI 판단, 전/후 비교, 측정 조건)
-│   │   │   ├── result_charts.js   # 결과 패널 부하 중 그래프 (inline SVG)
-│   │   │   └── style.css
+│   │   │   ├── result_panel.js    # 결과 패널 공용 계산 (자릿수·SLO 판정·요약·결론 규칙, #75 #93)
+│   │   │   ├── toolbar.css        # 상단 도구 막대 (보기 전환·저장 기록 불러오기, #93)
+│   │   │   ├── view_switch.js     # 기본 보기 / 상세 보기 전환 ?view=simple|detail, 기본 simple (#93)
+│   │   │   ├── saved_results.js   # 저장된 실행 기록 불러오기 (#93)
+│   │   │   └── refresh            # 결과 패널 보기 (#93)
+│   │   │       ├── common.css / common.js   # 두 보기 공용 구조·뷰모델(결론 한 줄·용어 풀이)·차트
+│   │   │       ├── c.css / c.js             # 기본 보기 (C 미니멀형, 한눈에)
+│   │   │       └── a.css / a.js             # 상세 보기 (A 관제 콘솔형, 전체 정보)
 │   │   └── main.py                # FastAPI 앱 진입점
 │   ├── Dockerfile
 │   └── requirements.txt
@@ -114,7 +121,8 @@ InfraGuard_Agent
 │   │   ├── test_run_history.py
 │   │   ├── test_replica_reset.py
 │   │   ├── test_run_gate.py       # 동시 실행 방지 (#87)
-│   │   └── test_grafana_config.py # Grafana 설정·버킷 일관성 (#74)
+│   │   ├── test_grafana_config.py # Grafana 설정·버킷 일관성 (#74)
+│   │   └── test_saved_results.py  # 저장된 결과 불러오기 API·경로 검증 (#93)
 │   └── integration
 │       └── test_e2e.py
 ├── results                        # 실행 결과 JSON (gitignore). 발표 증빙은 골라서 docs/evidence/로 옮긴다
@@ -195,6 +203,8 @@ class AgentRuntimeState(TypedDict):
 | GET | `/api/v1/agent/report/{task_id}` | 최소명 | 최종 종합 분석 리포트 반환. Phase 3·4에서 필드 추가 (기존 필드 유지) |
 | GET | `/api/v1/agent/replicas` | 최강우 | 현재 target-server replica 수(docker compose 실제 값)와 실행 중 여부 `busy`, 이유 `busy_reason`(`agent_running` / `load_test_running` / `replica_reset`, #87) |
 | POST | `/api/v1/agent/replicas/reset` | 최강우 | 측정 회차 사이 1대 초기화. 에이전트 실행·승인 대기 중이거나 끝나지 않은 부하 테스트가 있으면 409. results/에 기록하지 않음 |
+| GET | `/api/v1/results/saved` | 최강우 | `docs/evidence/` 결과 파일 목록 (읽기 전용, 파일명 순, 읽지 못한 파일은 `error` 표시, #93) |
+| GET | `/api/v1/results/saved/{file_name}` | 최강우 | 결과 파일 하나를 `/report` 모양(`report`)과 파일 정보(`saved`)로 반환. 이름 규칙 불일치 400, evidence 밖·없는 파일 404 (#93) |
 
 ## HITL(Human-In-The-Loop) 지점
 

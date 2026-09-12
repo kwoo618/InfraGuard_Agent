@@ -1,0 +1,473 @@
+/*
+ * 상세 보기 (A 관제 콘솔형, 디자인 개편 #93)
+ * 어두운 관제 콘솔 톤. 정보 밀도는 기존 화면 수준으로 두고 색·장식을 줄였다.
+ * 측정 회차 색(--ig-round-ramp)은 dataviz 검증 스크립트로 확인한 한 색상 명도 단계다 (어두운 면 #181b1f, ordinal 전 항목 PASS).
+ */
+
+:root {
+    color-scheme: dark;
+
+    --ig-font: system-ui, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    --ig-mono: Consolas, "Cascadia Mono", "Malgun Gothic", monospace;
+
+    --ig-page: #111217;
+    --ig-surface: #181b1f;
+    --ig-surface-2: #22252b;
+    --ig-chart-surface: #181b1f;
+    --ig-border: #2c3039;
+    --ig-border-strong: #3a3f4a;
+
+    --ig-text-strong: #e8e9ee;
+    --ig-text: #ccccdc;
+    --ig-text-muted: #a0a2b0;
+    --ig-text-faint: #7f8390;
+    --ig-link: #7aa7ff;
+
+    --ig-accent: #3565c9;
+    --ig-accent-hover: #3f71d6;
+    --ig-accent-contrast: #ffffff;
+    --ig-accent-wash: rgba(53, 101, 201, .28);
+
+    /* 상태 (dataviz 상태 팔레트). 글자는 어두운 면에서 4.5:1을 넘는 밝은 단계 */
+    --ig-good: #0ca30c;
+    --ig-bad: #d03b3b;
+    --ig-boundary: #fab219;
+    --ig-good-text: #45c945;
+    --ig-bad-text: #f28383;
+    --ig-warn-text: #f5c14f;
+    --ig-bad-wash: rgba(208, 59, 59, .14);
+
+    --ig-track: #2c3039;
+    --ig-input-bg: #111217;
+    --ig-log-bg: #0c0d11;
+    --ig-log-text: #b9bdcc;
+
+    --ig-grid: #262a31;
+    --ig-axis: #3a3f4a;
+    --ig-ref: #c3c2b7;
+    --ig-ref-text: #d8d9e0;
+    --ig-incomplete: rgba(255, 255, 255, .045);
+    --ig-tip-bg: #22252b;
+    --ig-tip-text: #e8e9ee;
+    --ig-tip-muted: #a0a2b0;
+
+    --ig-round-ramp: #256abf, #3987e5, #6da7ec, #9ec5f4, #cde2fb;
+    --ig-single: #3987e5;
+
+    --ig-radius: 4px;
+    --ig-radius-sm: 3px;
+    --ig-container-max: 1120px;
+    --ig-h1-size: 20px;
+    --ig-chart-bg: #181b1f;
+    --ig-chart-border: 1px solid #2c3039;
+
+    --ig-tb-bg: #181b1f;
+    --ig-tb-border: #2c3039;
+    --ig-tb-text: #ccccdc;
+    --ig-tb-muted: #8e909e;
+    --ig-tb-control: #111217;
+    --ig-tb-control-hover: #22252b;
+    --ig-tb-pressed-bg: #ccccdc;
+    --ig-tb-pressed-text: #111217;
+    --ig-tb-banner-bg: rgba(250, 178, 25, .10);
+    --ig-tb-banner-border: #7d6320;
+    --ig-tb-banner-text: #f5c14f;
+    --ig-tb-focus: #7aa7ff;
+    --ig-tb-error: #f28383;
+    --ig-tb-radius: 4px;
+}
+
+/* ---------------- 결과 패널 ---------------- */
+
+.ra {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.ra-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--ig-border);
+}
+
+.ra-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--ig-text-strong);
+}
+
+.ra-source {
+    padding: 1px 8px;
+    font-size: 12px;
+    color: var(--ig-warn-text);
+    border: 1px solid var(--ig-tb-banner-border);
+    border-radius: 3px;
+}
+
+.ra-cond {
+    font-size: 12.5px;
+    color: var(--ig-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ra-top .ig-grafana {
+    margin-left: auto;
+    padding: 5px 10px;
+    color: var(--ig-link);
+    text-decoration: none;
+    border: 1px solid var(--ig-border);
+    border-radius: 3px;
+}
+
+.ra-verdict {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 14px;
+    padding: 12px 16px;
+    background: var(--ig-surface);
+    border-left: 3px solid var(--ig-text-faint);
+}
+
+.ra-verdict b {
+    font-size: 15px;
+}
+
+.ra-verdict span {
+    font-size: 14px;
+    color: var(--ig-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.ra-verdict .ig-linkbtn {
+    margin-left: auto;
+}
+
+/* SLO·P95 풀이 (화면에 보이게) */
+.ra-glossary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 20px;
+    margin-top: -6px;
+}
+
+.ra-tone-good { border-left-color: var(--ig-good); }
+.ra-tone-bad { border-left-color: var(--ig-bad); }
+.ra-tone-boundary,
+.ra-tone-warn { border-left-color: var(--ig-boundary); }
+
+/* 측정 흐름: 측정 상자 → AI 제안·결정 → 측정 상자 … */
+.ra-flow {
+    display: flex;
+    align-items: stretch;
+}
+
+.ra-round {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 12px 14px;
+    background: var(--ig-surface);
+    border: 1px solid var(--ig-border);
+}
+
+.ra-round-h {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+    color: var(--ig-text-muted);
+}
+
+.ra-boxes {
+    display: flex;
+    gap: 3px;
+    height: 12px;
+    margin-bottom: 10px;
+}
+
+.ra-boxes i {
+    display: block;
+    width: 12px;
+    background: var(--ig-single);
+    border-radius: 2px;
+}
+
+.ra-p95 {
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: var(--ig-text-strong);
+}
+
+.ra-p95 small {
+    margin-left: 2px;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--ig-text-muted);
+}
+
+.ra-slo {
+    margin-top: 4px;
+    font-size: 12.5px;
+    color: var(--ig-text);
+}
+
+.ra-sub {
+    margin-top: 6px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ig-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ra-step {
+    position: relative;
+    flex: 0 0 140px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 0 8px;
+}
+
+.ra-step::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    right: 4px;
+    border-top: 1px dashed var(--ig-border-strong);
+}
+
+.ra-step-end::before {
+    right: 50%;
+}
+
+.ra-step-inner {
+    position: relative;
+    padding: 6px 8px;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: center;
+    color: var(--ig-text-muted);
+    background: var(--ig-page);
+}
+
+.ra-step-inner em {
+    font-style: normal;
+    font-weight: 600;
+    color: var(--ig-text-strong);
+}
+
+/* 섹션 */
+.ra-section-h {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 12px;
+    margin-bottom: 8px;
+}
+
+.ra-section-h h3 {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ig-text-muted);
+}
+
+/* AI 판단 근거 */
+.ra-judge {
+    background: var(--ig-surface);
+    border: 1px solid var(--ig-border);
+}
+
+.ra-judge-row {
+    padding: 12px 16px;
+}
+
+.ra-judge-row + .ra-judge-row {
+    border-top: 1px solid var(--ig-border);
+}
+
+.ra-judge-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 16px;
+    font-size: 13.5px;
+}
+
+.ra-judge-round {
+    min-width: 6.5em;
+    font-size: 12.5px;
+    color: var(--ig-text-faint);
+}
+
+.ra-conclusion {
+    font-weight: 600;
+}
+
+.ra-kv-item {
+    color: var(--ig-text-muted);
+}
+
+.ra-judge-head .confidence {
+    margin-left: auto;
+}
+
+.ra-evidence {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    margin-top: 6px;
+    font-size: 13px;
+}
+
+.ra-evidence-label {
+    min-width: 6.5em;
+    color: var(--ig-text-faint);
+}
+
+.ra-evidence-values {
+    display: flex;
+    flex-wrap: wrap;
+    color: var(--ig-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.ra-evidence-values > span + span::before {
+    content: "·";
+    margin: 0 8px;
+    color: var(--ig-text-faint);
+}
+
+.ra-excluded,
+.ra-decision {
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--ig-text-muted);
+}
+
+.ra-decision b {
+    color: var(--ig-text-strong);
+}
+
+/* 전/후 비교 카드 */
+.ra-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+}
+
+.ra-card {
+    padding: 12px 14px;
+    background: var(--ig-surface);
+    border: 1px solid var(--ig-border);
+}
+
+.ra-card-t {
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    color: var(--ig-text-muted);
+}
+
+.ra-card-v {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--ig-text-strong);
+}
+
+.ra-card-v .ra-before,
+.ra-card-v .ra-arrow {
+    font-weight: 400;
+    color: var(--ig-text-muted);
+}
+
+.ra-card-d {
+    margin-top: 4px;
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+.ra-grid2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.ra-grid1 {
+    margin-top: 10px;
+}
+
+.ra-foot {
+    padding-top: 12px;
+    font-size: 13px;
+    border-top: 1px solid var(--ig-border);
+}
+
+.ra-foot-h {
+    margin-bottom: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ig-text-muted);
+}
+
+.ra-dl {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 4px 20px;
+}
+
+.ra-dl dt,
+.ra-dl-wide dt {
+    min-width: 6.5em;
+}
+
+.ra-dl-wide {
+    margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+    .ra-flow {
+        flex-direction: column;
+    }
+
+    .ra-step {
+        flex: 0 0 auto;
+        padding: 6px 0;
+    }
+
+    .ra-step::before,
+    .ra-step-end::before {
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        right: auto;
+        border-top: 0;
+        border-left: 1px dashed var(--ig-border-strong);
+    }
+
+    .ra-step-end::before {
+        bottom: 50%;
+    }
+
+    .ra-grid2 {
+        grid-template-columns: 1fr;
+    }
+
+    .ra-top .ig-grafana {
+        margin-left: 0;
+    }
+
+    .ra-judge-head .confidence {
+        margin-left: 0;
+    }
+}
