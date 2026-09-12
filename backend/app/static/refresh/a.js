@@ -71,7 +71,7 @@
 
         const slo = node('div', `ra-slo ig-slo ig-slo-${round.sloState}`);
         slo.append(node('span', 'ig-dot'), round.sloText);
-        box.append(slo, node('div', 'ra-sub', `처리량 ${round.tpsText} · 에러율 ${round.errText}`));
+        box.append(slo, node('div', 'ra-sub', `처리량 ${round.tpsText} · 오류율 ${round.errText}`));
         return box;
     }
 
@@ -150,7 +150,7 @@
             span.append(entry.text);
             values.appendChild(span);
         });
-        evidence.append(node('span', 'ra-evidence-label', '진단 입력 측정값'), values);
+        evidence.append(node('span', 'ra-evidence-label', 'AI가 본 측정값'), values);
         row.appendChild(evidence);
 
         const excluded = item.evidence.find(entry => entry.excluded);
@@ -182,6 +182,12 @@
     function judgement(vm) {
         const section = node('section', 'ra-section ra-judgement');
         section.appendChild(sectionHead('AI 판단 근거'));
+        // 처음 보는 사람 기준 용어 풀이 (진단 입력 측정값 = AI가 본 측정값)
+        section.appendChild(IGRefresh.note(
+            'AI가 본 측정값 = AI가 판단할 때 받은 측정값(진단 입력) · '
+            + '활성 연결 = 그 순간 서버가 처리 중이거나 기다리는 요청 수 · '
+            + '재검증 = 서버를 늘린 뒤 같은 조건으로 다시 측정해 비교한 것',
+        ));
 
         if (vm.diagnoses.length === 0) {
             section.appendChild(IGRefresh.empty('AI 진단 결과 없음 (진단 결과를 받기 전에 실행이 끝났습니다)'));
@@ -226,18 +232,18 @@
         if (vm.multi) {
             section.appendChild(sectionHead(`전/후 비교 (측정 ${first.round} → 측정 ${last.round})`));
             cards.append(
-                card('처리량 (TPS)', [first.tpsText, last.tpsText], vm.deltas.tps),
-                card('P95 응답 시간', [first.p95Text, last.p95Text], vm.deltas.p95, last),
-                card('에러율', [first.errText, last.errText], vm.deltas.err),
-                card('서버 수', [first.replicasText, last.replicasText], vm.deltas.replicas),
+                card('처리량 (1초에 처리한 요청 수)', [first.tpsText, last.tpsText], vm.deltas.tps),
+                card('응답 시간 (P95)', [first.p95Text, last.p95Text], vm.deltas.p95, last),
+                card('오류율 (실패한 요청 비율)', [first.errText, last.errText], vm.deltas.err),
+                card('서버 대수 (replica)', [first.replicasText, last.replicasText], vm.deltas.replicas),
             );
         } else {
             section.appendChild(sectionHead(`측정 결과 (측정 ${first.round}, 1회)`));
             cards.append(
-                card('처리량 (TPS)', [first.tpsText]),
-                card('P95 응답 시간', [first.p95Text], null, first),
-                card('에러율', [first.errText]),
-                card('서버 수', [first.replicasText]),
+                card('처리량 (1초에 처리한 요청 수)', [first.tpsText]),
+                card('응답 시간 (P95)', [first.p95Text], null, first),
+                card('오류율 (실패한 요청 비율)', [first.errText]),
+                card('서버 대수 (replica)', [first.replicasText]),
             );
         }
         section.appendChild(cards);
@@ -256,7 +262,7 @@
 
     function loadGraphs(root, vm) {
         const section = root.appendChild(node('section', 'ra-section'));
-        section.appendChild(sectionHead('부하 중 그래프'));
+        section.appendChild(sectionHead('부하를 주는 동안의 그래프'));
 
         const top = section.appendChild(node('div', 'ra-grid2'));
         IGRefresh.charts.tpsTimeline(top, vm);
@@ -274,11 +280,11 @@
 
     function footer(vm) {
         const foot = node('footer', 'ra-foot');
-        // 짧은 조건은 여러 칸, 결과 파일 경로처럼 긴 값은 한 줄 전체 폭
+        // 측정 조건은 접지 않고, 판단 모델·결과 파일·코드 버전은 "기술 정보"로 접는다
         foot.append(
             node('div', 'ra-foot-h', '측정 조건'),
             IGRefresh.definitionList(vm.conditionItems, 'ig-dl ra-dl'),
-            IGRefresh.definitionList(vm.metaItems, 'ig-dl ra-dl-wide'),
+            IGRefresh.techDetails(vm, 'ig-raw ra-tech', 'tech-info'),
         );
         if (vm.resourcesUnmeasured) foot.appendChild(IGRefresh.note(IGRefresh.referenceNotes(vm)[0]));
         return foot;

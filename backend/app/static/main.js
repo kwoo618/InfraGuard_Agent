@@ -294,7 +294,7 @@ const STATUS_TEXT = {
     ready: '대기',
     running: '실행 중',
     waiting: '승인 대기',
-    scaling: '스케일링 중',
+    scaling: '서버 늘리는 중',
     completed: '완료',
     error: '오류',
 };

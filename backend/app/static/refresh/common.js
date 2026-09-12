@@ -42,6 +42,20 @@ const IGRefresh = (function () {
     // 판단 이유 발췌: LLM 원인(cause)에서 스케일링 판단을 말하는 문장을 찾는 말
     const REASON_KEYWORD = /스케일링|확장|증설|컨테이너 수/;
 
+    // 부하 시나리오가 부르는 테스트 서버의 요청 종류. 이름만으로는 처음 보는 사람이 알 수 없어 짧게 덧붙인다.
+    // 근거: infra/locust/locustfile.py(가중치 /light 6, /heavy 3, /flaky 1, /health 1),
+    //       infra/target-server/main.py(/light 10ms, /heavy 동시 5개 제한·0.2~0.6초, /flaky 5% 확률 500, /health 즉시 응답)
+    const ENDPOINT_NOTE = {
+        '/light': '가벼운 요청',
+        '/heavy': '무거운 작업',
+        '/flaky': '가끔 실패하는 요청',
+        '/health': '상태 확인',
+    };
+
+    const ENDPOINT_NOTE_LINE = '요청 종류는 테스트 서버가 받는 요청입니다. '
+        + '/light는 가벼운 요청(10ms), /heavy는 무거운 작업(동시 5개까지만 처리, 0.2~0.6초), '
+        + '/flaky는 가끔 실패하는 요청(5% 오류), /health는 상태 확인입니다.';
+
 
     // -----------------------------------------------------------------
     // 기본 도구
@@ -327,11 +341,12 @@ const IGRefresh = (function () {
                     : `${fmtConfidence(Math.min(...confidences))}~${fmtConfidence(Math.max(...confidences))}`),
             resourcesUnmeasured,
             threshold: report.low_confidence_threshold,
+            // 측정 조건은 결과를 이해하는 데 필요해서 두 보기 모두 접지 않고 보여 준다
             conditionItems: conditions ? [
-                ['동시 가상 사용자', isNumber(conditions.virtual_users) ? `${conditions.virtual_users}명` : NO_DATA],
+                ['동시 가상 사용자 수', isNumber(conditions.virtual_users) ? `${conditions.virtual_users}명` : NO_DATA],
                 ['부하 시간', isNumber(conditions.duration_sec) ? `${conditions.duration_sec}초` : NO_DATA],
-                ['P95 SLO', isNumber(conditions.p95_slo_ms) ? `${conditions.p95_slo_ms}ms` : '기준 없음'],
-                ['시작 서버', fmtReplicas(conditions.start_replicas)],
+                ['응답 목표(SLO)', isNumber(conditions.p95_slo_ms) ? `${conditions.p95_slo_ms}ms` : '기준 없음'],
+                ['시작 서버 대수', fmtReplicas(conditions.start_replicas)],
             ] : [],
             metaItems: [
                 ...(conditions && conditions.llm_model ? [['판단 모델', conditions.llm_model]] : []),
@@ -343,9 +358,7 @@ const IGRefresh = (function () {
         };
 
         vm.conditionLine = conditions
-            ? vm.conditionItems.map(([label, value]) => (label === '동시 가상 사용자'
-                ? `동시 가상 사용자 ${value}`
-                : `${label} ${value}`)).join(' · ')
+            ? vm.conditionItems.map(([label, value]) => `${label} ${value}`).join(' · ')
             : '측정 조건 기록 없음';
         vm.verdict = verdictOf(vm);
         vm.headline = headlineOf(vm);
@@ -420,7 +433,7 @@ const IGRefresh = (function () {
         }
     }
 
-    /** SLO·P95 풀이. [용어, 뜻] */
+    /** 용어 풀이. [용어, 뜻] — 처음 보는 사람 기준으로 짧게. 마우스 올리기가 아니라 화면에 보이게 쓴다 */
     function glossaryOf(vm) {
         const slo = vm.slo;
         const seconds = isNumber(slo) ? `${Number((slo / 1000).toFixed(3))}초` : null;
@@ -429,6 +442,12 @@ const IGRefresh = (function () {
             slo: isNumber(slo)
                 ? [`SLO ${slo}ms`, `요청의 95%가 ${seconds} 안에 응답해야 한다는 목표`]
                 : ['SLO', '요청의 95%가 정해진 시간 안에 응답해야 한다는 목표 (이 실행은 기준값 기록 없음)'],
+            tps: ['처리량(TPS)', '1초에 처리한 요청 수'],
+            replicas: ['서버 대수', '같은 테스트 서버를 몇 개 띄웠는지 (replica)'],
+            rounds: ['측정 회차', '부하 테스트를 한 번 돌려 값을 잰 단위'],
+            connections: ['활성 연결', '그 순간 서버가 처리 중이거나 기다리는 요청 수'],
+            revalidation: ['재검증', '서버를 늘린 뒤 같은 조건으로 다시 측정해 앞 측정과 비교한 것'],
+            evidence: ['진단 입력 측정값', 'AI가 판단할 때 받은 측정값'],
         };
     }
 
@@ -657,7 +676,7 @@ const IGRefresh = (function () {
             ? drawable.map(item => ({ label: item.label, color: item.color, shape: 'line' }))
             : [];
         if (incompleteXs.length > 0) {
-            legendItems.push({ label: '불완전 구간 (부하 종료 시점에 걸린 마지막 구간, 앞 구간과 직접 비교하지 않음)', shape: 'dash' });
+            legendItems.push({ label: '마지막 구간: 부하가 끝나는 시점이라 요청이 덜 잡힙니다 (앞 구간과 직접 비교하지 않음)', shape: 'dash' });
         }
         if (legendItems.length > 0) figure.appendChild(legend(legendItems));
         return figure;
@@ -799,8 +818,8 @@ const IGRefresh = (function () {
         if (values.length === 0) return emptyChart(host, title, subtitle);
 
         const { figure, width } = chartFrame(host, title, subtitle);
-        const height = 210;
-        const pad = { left: 8, right: 8, top: 22, bottom: 26 };
+        const height = 224;
+        const pad = { left: 8, right: 8, top: 22, bottom: 40 };
         const plotWidth = width - pad.left - pad.right;
         const baseY = height - pad.bottom;
         const plotHeight = baseY - pad.top;
@@ -833,6 +852,10 @@ const IGRefresh = (function () {
             });
 
             svg.appendChild(svgEl('text', { x: groupCenter, y: baseY + 17, 'text-anchor': 'middle', class: 'igc-label' }, group.label));
+            // 요청 종류가 무엇인지 이름 아래에 한 마디 (처음 보는 사람 기준)
+            if (group.sublabel) {
+                svg.appendChild(svgEl('text', { x: groupCenter, y: baseY + 31, 'text-anchor': 'middle', class: 'igc-sublabel' }, group.sublabel));
+            }
         });
 
         figure.appendChild(svg);
@@ -870,8 +893,8 @@ const IGRefresh = (function () {
 
     function tpsTimeline(host, vm) {
         return lineChart(host, {
-            title: '초당 처리량 (req/s)',
-            subtitle: '1초 구간마다 완료된 요청 수 · 측정 회차별 겹침',
+            title: '초당 처리한 요청 수',
+            subtitle: '1초 구간마다 끝난 요청 수 (처리량·TPS) · 측정 회차별 겹쳐 그림',
             series: timeSeries(vm, (point, bucket) => (isNumber(point.requests) ? point.requests / bucket : null)),
             refLine: null,
             formatValue: (value, point) => `${fmtTps(value)} req/s (요청 ${point.raw.requests}건, 실패 ${point.raw.failures}건)`,
@@ -882,8 +905,8 @@ const IGRefresh = (function () {
 
     function p95Timeline(host, vm) {
         return lineChart(host, {
-            title: '초당 P95 응답 시간 (ms)',
-            subtitle: '1초 구간 원시 응답시간의 P95 · 점선 = SLO',
+            title: '초당 응답 시간 (P95, ms)',
+            subtitle: '1초 구간마다 계산한 P95 · 점선 = 응답 목표(SLO)',
             series: timeSeries(vm, point => (isNumber(point.p95_ms) ? point.p95_ms : null)),
             refLine: isNumber(vm.slo) ? { value: vm.slo, label: `SLO ${vm.slo}ms` } : null,
             formatValue: (value, point) => `${fmtMs(value)} (요청 ${point.raw.requests}건)`,
@@ -893,9 +916,9 @@ const IGRefresh = (function () {
     }
 
     function endpointChart(host, vm) {
-        const title = '엔드포인트별 P95 (ms)';
+        const title = '요청 종류별 응답 시간 (P95, ms)';
         const withEndpoints = vm.rounds.filter(round => Array.isArray(round.record.endpoints) && round.record.endpoints.length > 0);
-        if (withEndpoints.length === 0) return emptyChart(host, title, 'Locust 엔드포인트 통계');
+        if (withEndpoints.length === 0) return emptyChart(host, title, '요청 종류(엔드포인트)별 Locust 통계');
 
         const chosen = withEndpoints.length >= 2 ? [withEndpoints[0], lastOf(withEndpoints)] : [withEndpoints[0]];
         const names = [];
@@ -903,11 +926,12 @@ const IGRefresh = (function () {
             if (!names.includes(endpoint.name)) names.push(endpoint.name);
         }));
 
-        return groupedColumnChart(host, {
+        const figure = groupedColumnChart(host, {
             title,
-            subtitle: chosen.length >= 2 ? 'Locust 엔드포인트 통계 · 첫 측정과 마지막 측정' : 'Locust 엔드포인트 통계',
+            subtitle: chosen.length >= 2 ? '요청 종류(엔드포인트)별 · 첫 측정과 마지막 측정' : '요청 종류(엔드포인트)별',
             groups: names.map(name => ({
                 label: name,
+                sublabel: ENDPOINT_NOTE[name] || null,
                 values: chosen.map(round => {
                     const endpoint = round.record.endpoints.find(item => item.name === name);
                     return endpoint && isNumber(endpoint.p95_ms) ? endpoint.p95_ms : null;
@@ -916,17 +940,20 @@ const IGRefresh = (function () {
             series: chosen.map(round => ({ label: seriesLabel(round), color: round.color })),
             format: value => `${Math.round(value)}`,
         });
+
+        figure.appendChild(note(ENDPOINT_NOTE_LINE));
+        return figure;
     }
 
     /** 측정별 에러율. 측정이 1회면 막대 하나짜리 차트 대신 값만 보인다. */
     function errorRateChart(host, vm) {
-        const title = '측정별 에러율 (%)';
-        const subtitle = 'Locust 전체 요청 기준';
+        const title = '측정별 오류율 (%)';
+        const subtitle = '전체 요청 중 실패한 요청 비율';
 
         if (vm.rounds.length < 2) {
             const { figure } = chartFrame(host, title, subtitle);
             const round = vm.rounds[0];
-            figure.appendChild(node('p', 'igc-single', round ? `${round.name} (서버 ${round.replicasText}): 에러율 ${round.errText}` : NO_DATA));
+            figure.appendChild(node('p', 'igc-single', round ? `${round.name} (서버 ${round.replicasText}): 오류율 ${round.errText}` : NO_DATA));
             return figure;
         }
 
@@ -945,8 +972,8 @@ const IGRefresh = (function () {
     }
 
     function instanceChart(host, vm) {
-        const title = '서버별 요청 분산';
-        const subtitle = 'Prometheus 부하 전후 차이 · /health·/metrics 제외';
+        const title = '서버별 처리한 요청 수';
+        const subtitle = '서버(replica)마다 받은 요청 수 · /health·/metrics 제외';
         const rounds = vm.rounds.filter(round => {
             const data = round.record.requests_by_instance;
             return data && data.counts && Object.keys(data.counts).length > 0;
@@ -996,20 +1023,21 @@ const IGRefresh = (function () {
         });
 
         figure.appendChild(svg);
-        figure.appendChild(note('서버 이름은 컨테이너 IP 끝자리입니다. /health는 Docker 헬스체크 요청과, /metrics는 Prometheus 수집 요청과 구분할 수 없어 뺐습니다.'));
+        figure.appendChild(note('요청 수는 부하 전후 Prometheus 값의 차이입니다. 서버 이름은 컨테이너 IP 끝자리입니다. '
+            + '/health는 Docker 상태 확인 요청과, /metrics는 Prometheus 수집 요청과 구분할 수 없어 뺐습니다.'));
         return figure;
     }
 
-    const LOAD_GRAPH_NOTE = '초당 값은 요청별 원시 기록으로 1초 구간마다 계산했습니다(구간 P95는 nearest-rank). '
-        + '요청이 없는 구간은 선을 끊습니다. 요약 P95(Locust)와 조금 다를 수 있습니다.';
+    const LOAD_GRAPH_NOTE = '초당 값은 요청 하나하나의 기록으로 1초 구간마다 계산했습니다(구간 P95는 nearest-rank). '
+        + '요청이 없는 구간은 선을 끊습니다. 위 요약 P95(Locust 계산)와 조금 다를 수 있습니다.';
 
-    const AGGREGATED_NOTE = 'TPS·P95·에러율은 Locust 전체 엔드포인트 합산(Aggregated) 측정값입니다.';
+    const AGGREGATED_NOTE = '처리량·응답 시간(P95)·오류율은 Locust가 잰 전체 요청 합산값입니다.';
 
     /** 라운드별 P95 (SLO 판정 색) · 처리량 막대. 측정이 2회 이상일 때만 쓴다 */
     function roundP95Chart(host, vm) {
         return columnChart(host, {
-            title: '측정별 P95 응답 시간',
-            subtitle: isNumber(vm.slo) ? `점선 = SLO ${vm.slo}ms` : null,
+            title: '측정별 응답 시간 (P95)',
+            subtitle: isNumber(vm.slo) ? `점선 = 응답 목표(SLO) ${vm.slo}ms` : null,
             bars: vm.rounds.map(round => ({
                 label: round.name,
                 sublabel: `서버 ${round.replicasText}`,
@@ -1025,8 +1053,8 @@ const IGRefresh = (function () {
 
     function roundTpsChart(host, vm) {
         return columnChart(host, {
-            title: '측정별 처리량 (TPS)',
-            subtitle: '초당 요청 수',
+            title: '측정별 처리량',
+            subtitle: '1초에 처리한 요청 수 (TPS)',
             bars: vm.rounds.map(round => ({
                 label: round.name,
                 sublabel: `서버 ${round.replicasText}`,
@@ -1074,6 +1102,18 @@ const IGRefresh = (function () {
         return notes;
     }
 
+    /**
+     * 기술 정보 접힘 (판단 모델·결과 파일 경로·코드 버전). 결과를 읽는 데 필요한 값이 아니라서 접어 둔다.
+     * 측정 조건은 접지 않는다 (model().conditionItems).
+     */
+    function techDetails(vm, className, key) {
+        const details = node('details', className || 'ig-tech');
+        details.dataset.key = key || 'tech-info';
+        details.appendChild(node('summary', null, '기술 정보'));
+        details.appendChild(definitionList(vm.metaItems));
+        return details;
+    }
+
     return {
         cssVar,
         node,
@@ -1090,6 +1130,9 @@ const IGRefresh = (function () {
         forcedAlert,
         definitionList,
         referenceNotes,
+        techDetails,
+        ENDPOINT_NOTE,
+        ENDPOINT_NOTE_LINE,
         statusColor,
         niceScale,
         chartFrame,

@@ -6,11 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>InfraGuard Agent Dashboard</title>
     <!-- 보기 전환 (#93): 기본 보기(simple) = refresh/c.css, 상세 보기(detail) = refresh/a.css. view_switch.js가 고른다 -->
-    <link rel="stylesheet" href="toolbar.css?v=13">
-    <link rel="stylesheet" href="refresh/common.css?v=13">
-    <link rel="stylesheet" href="refresh/c.css?v=13" data-view-sheet="simple">
-    <link rel="stylesheet" href="refresh/a.css?v=13" data-view-sheet="detail">
-    <script src="view_switch.js?v=13"></script>
+    <link rel="stylesheet" href="toolbar.css?v=14">
+    <link rel="stylesheet" href="refresh/common.css?v=14">
+    <link rel="stylesheet" href="refresh/c.css?v=14" data-view-sheet="simple">
+    <link rel="stylesheet" href="refresh/a.css?v=14" data-view-sheet="detail">
+    <script src="view_switch.js?v=14"></script>
 </head>
 
 <body>
@@ -62,7 +62,7 @@
 
             <div id="step-metric" class="timeline-step">
                 <div class="timeline-circle"></div>
-                <span class="timeline-label">메트릭</span>
+                <span class="timeline-label">지표 수집</span>
             </div>
 
             <div class="timeline-line"></div>
@@ -90,14 +90,14 @@
 
             <div id="step-scale" class="timeline-step">
                 <div class="timeline-circle"></div>
-                <span class="timeline-label">스케일링</span>
+                <span class="timeline-label">서버 늘리기</span>
             </div>
 
             <div class="timeline-line"></div>
 
             <div id="step-report" class="timeline-step">
                 <div class="timeline-circle"></div>
-                <span class="timeline-label">리포트</span>
+                <span class="timeline-label">결과 정리</span>
             </div>
 
         </div>
@@ -108,7 +108,7 @@
             <div class="input-group">
                 <label for="target-tps-input">동시 가상 사용자 수</label>
                 <input type="number" id="target-tps-input" value="30" min="1" aria-describedby="target-tps-hint">
-                <p id="target-tps-hint" class="input-hint">Locust 동시 접속 사용자 · 처리량 목표 아님</p>
+                <p id="target-tps-hint" class="input-hint">동시에 요청을 보내는 가상 사용자 수입니다 (Locust). 처리량 목표가 아닙니다.</p>
             </div>
 
             <div class="input-group">
@@ -169,7 +169,7 @@
             <p id="modal-message"></p>
 
             <!-- 용어 풀이 (#93): 승인 요청 문구에 P95·SLO가 먼저 나올 수 있다 -->
-            <p class="ig-glossary"><b>P95</b>: 느린 순서로 상위 5%를 뺀 응답 시간 · <b>SLO</b>: 요청의 95%가 정해진 시간 안에 응답해야 한다는 목표</p>
+            <p class="ig-glossary"><b>P95</b>: 느린 순서로 상위 5%를 뺀 응답 시간 · <b>SLO</b>: 요청의 95%가 정해진 시간 안에 응답해야 한다는 목표 · <b>스케일링</b>: 같은 서버(replica)를 더 띄워 처리 능력을 늘리는 것</p>
 
             <!-- 저신뢰 확인 게이트 (#83): 신뢰도 기준 미만 스케일링 제안일 때만 보인다 -->
             <div id="low-confidence-box" class="low-confidence-box hidden">
@@ -182,7 +182,7 @@
 
             <div class="modal-buttons">
 
-                <button id="approve-btn">승인하고 스케일링</button>
+                <button id="approve-btn">승인하고 서버 늘리기</button>
 
                 <button id="reject-btn">거절</button>
 
@@ -192,12 +192,12 @@
 
     </div>
 
-    <script src="result_panel.js?v=13"></script>
-    <script src="refresh/common.js?v=13"></script>
-    <script src="refresh/c.js?v=13"></script>
-    <script src="refresh/a.js?v=13"></script>
-    <script src="saved_results.js?v=13"></script>
-    <script src="main.js?v=13"></script>
+    <script src="result_panel.js?v=14"></script>
+    <script src="refresh/common.js?v=14"></script>
+    <script src="refresh/c.js?v=14"></script>
+    <script src="refresh/a.js?v=14"></script>
+    <script src="saved_results.js?v=14"></script>
+    <script src="main.js?v=14"></script>
 
 </body>
 

@@ -69,6 +69,17 @@
             slo.append(node('span', 'ig-dot'), last.sloText);
             box.appendChild(slo);
         }
+
+        // 측정 조건은 결과를 이해하는 데 필요해서 접지 않는다 (기술 정보만 접는다)
+        if (vm.conditionItems.length > 0) {
+            const line = node('p', 'rc-conditions');
+            vm.conditionItems.forEach(([label, value]) => {
+                const item = node('span');
+                item.append(`${label} `, node('b', null, value));
+                line.appendChild(item);
+            });
+            box.appendChild(line);
+        }
     }
 
     // ---------------- 서버 흐름 그림 ----------------
@@ -119,7 +130,7 @@
     function flow(root, vm) {
         const figure = root.appendChild(node('figure', 'rc-flow'));
         const caption = node('figcaption', 'igc-caption');
-        caption.append(node('span', 'igc-title', '서버 흐름'), node('span', 'igc-sub', '측정마다 서버 수와 P95'));
+        caption.append(node('span', 'igc-title', '서버 흐름'), node('span', 'igc-sub', '측정마다 서버 대수와 응답 시간(P95)'));
         figure.appendChild(caption);
 
         const track = figure.appendChild(node('div', 'rc-flow-track'));
@@ -221,11 +232,12 @@
         const first = vm.rounds[0];
         const last = vm.rounds[vm.rounds.length - 1];
 
+        // 라벨에 짧은 풀이를 붙인다 (처음 보는 사람 기준)
         grid.append(
-            stat('처리량 (TPS)', last.tpsText, vm.multi ? `${first.tpsText}에서 ${vm.deltas.tps.text}` : '측정 1회', vm.multi ? vm.deltas.tps.tone : null),
-            stat('에러율', last.errText, vm.multi ? `${first.errText}에서 ${vm.deltas.err.text}` : null, vm.multi ? vm.deltas.err.tone : null),
-            stat('서버', last.replicasText, proposalText(vm)),
-            stat('AI 신뢰도', vm.confidenceRange, vm.diagnoses.length > 0 ? `AI 판단 ${vm.diagnoses.length}회` : 'AI 진단 결과 없음'),
+            stat('처리량 (1초에 처리한 요청 수)', last.tpsText, vm.multi ? `${first.tpsText}에서 ${vm.deltas.tps.text}` : '측정 1회', vm.multi ? vm.deltas.tps.tone : null),
+            stat('오류율 (실패한 요청 비율)', last.errText, vm.multi ? `${first.errText}에서 ${vm.deltas.err.text}` : null, vm.multi ? vm.deltas.err.tone : null),
+            stat('서버 대수 (replica)', last.replicasText, proposalText(vm)),
+            stat('AI 신뢰도 (AI가 매긴 확신 정도)', vm.confidenceRange, vm.diagnoses.length > 0 ? `AI 판단 ${vm.diagnoses.length}회` : 'AI 진단 결과 없음'),
         );
         return grid;
     }
@@ -246,7 +258,7 @@
             const round = vm.rounds.find(candidate => candidate.round === item.round);
             const line = node('p', 'rc-reason-line');
             line.append(
-                `측정 ${item.round ?? '-'}${round ? ` · 서버 ${round.replicasText} · P95 ${round.p95Text}` : ''} → `,
+                `측정 ${item.round ?? '-'}${round ? ` · 서버 ${round.replicasText} · 응답 시간(P95) ${round.p95Text}` : ''} → `,
                 node('strong', `tone-${item.conclusion.tone}`, item.conclusion.text),
                 node('span', 'rc-reason-meta', ` (신뢰도 ${item.confidenceText}${item.decisionText ? ` · ${item.decisionText}` : ''})`),
             );
@@ -261,7 +273,15 @@
             }
         });
 
-        inner.appendChild(linkButton('판단 원문과 진단 입력 측정값은 상세 보기에서 →', 'ig-linkbtn', () => toDetail('.ra-judgement')));
+        inner.appendChild(linkButton('판단 원문과 AI가 본 측정값은 상세 보기에서 →', 'ig-linkbtn', () => toDetail('.ra-judgement')));
+    }
+
+    /** 기술 정보(판단 모델·결과 파일·코드 버전)는 결과를 읽는 데 필요한 값이 아니라서 접어 둔다 */
+    function techInfo(root, vm) {
+        const details = root.appendChild(node('details', 'rc-fold'));
+        details.dataset.key = 'c-tech';
+        details.appendChild(node('summary', null, '기술 정보'));
+        details.appendChild(node('div', 'rc-fold-body')).appendChild(IGRefresh.definitionList(vm.metaItems));
     }
 
     function links(root) {
@@ -283,6 +303,7 @@
         hero(root, vm);
 
         if (vm.history.length === 0) {
+            techInfo(root, vm);
             links(root);
             return;
         }
@@ -295,6 +316,7 @@
 
         root.appendChild(stats(vm));
         reasons(root, vm);
+        techInfo(root, vm);
         links(root);
     }
 
