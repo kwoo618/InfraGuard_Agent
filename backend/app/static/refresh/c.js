@@ -273,7 +273,7 @@
             }
         });
 
-        inner.appendChild(linkButton('판단 원문과 AI가 본 측정값은 상세 보기에서 →', 'ig-linkbtn', () => toDetail('.ra-judgement')));
+        inner.appendChild(linkButton('판단 원문과 AI가 본 측정값은 상세 보기에서 →', 'ig-linkbtn', () => toDetail('.ra-reasoning')));
     }
 
     /** 기술 정보(판단 모델·결과 파일·코드 버전)는 결과를 읽는 데 필요한 값이 아니라서 접어 둔다 */
